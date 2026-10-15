@@ -1,0 +1,159 @@
+/* Main container
+.container {
+    padding: 1rem;
+    background: #f4fbf6;
+    border-radius: 10px;
+}
+
+
+.slds-grid {
+    margin-bottom: 12px;
+}
+
+
+.slds-align-bottom {
+    display: flex;
+    align-items: flex-end;
+}
+
+
+lightning-combobox,
+lightning-dual-listbox,
+lightning-input {
+    margin-bottom: 0.75rem;
+}
+
+
+lightning-input[type="checkbox"] {
+    margin-top: 10px;
+}
+
+.slds-table {
+    background: #ffffff;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #d8e6df;
+}
+
+
+.slds-table thead th {
+    background: #e6f4ea;
+    color: #1f5131;
+    font-weight: 600;
+    padding: 10px;
+    text-align: left;
+}
+
+
+.slds-table tbody td {
+    padding: 8px 10px;
+}
+
+.slds-table tbody tr:hover {
+    background-color: #f0faf4;
+}
+
+
+.slds-table th:first-child,
+.slds-table td:first-child {
+    width: 40px;
+}
+
+
+:host {
+    --slds-c-card-header-text-color: #1f5131;
+    --slds-c-card-header-font-weight: 600;
+}
+
+@media (max-width: 768px) {
+    .slds-grid {
+        flex-direction: column;
+    }
+
+    .slds-col {
+        width: 100% !important;
+    }
+} */
+
+
+/* =========================================================================================================== */
+
+/* Main container */
+.container {
+    padding: 1rem;
+    background: #f4fbf6;
+    border-radius: 10px;
+}
+
+/* Row spacing */
+.slds-grid {
+    margin-bottom: 12px;
+}
+
+/* Align button to bottom of input */
+.slds-align-bottom {
+    display: flex;
+    align-items: flex-end;
+}
+
+/* Inputs spacing */
+lightning-combobox,
+lightning-dual-listbox,
+lightning-input {
+    margin-bottom: 0.75rem;
+}
+
+/* Checkbox spacing */
+lightning-input[type="checkbox"] {
+    margin-top: 10px;
+}
+
+/* Lead table */
+.slds-table {
+    background: #ffffff;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #d8e6df;
+}
+
+/* Table header */
+.slds-table thead th {
+    background: #e6f4ea;
+    color: #1f5131;
+    font-weight: 600;
+    padding: 10px;
+    text-align: left;
+}
+
+/* Table rows */
+.slds-table tbody td {
+    padding: 8px 10px;
+}
+
+/* Hover effect */
+.slds-table tbody tr:hover {
+    background-color: #f0faf4;
+}
+
+/* Checkbox column width */
+.slds-table th:first-child,
+.slds-table td:first-child {
+    width: 40px;
+}
+
+/* Card title styling */
+:host {
+    --slds-c-card-header-text-color: #1f5131;
+    --slds-c-card-header-font-weight: 600;
+}
+
+/* Responsive support */
+@media (max-width: 768px) {
+    .slds-grid {
+        flex-direction: column;
+    }
+
+    .slds-col {
+        width: 100% !important;
+    }
+}

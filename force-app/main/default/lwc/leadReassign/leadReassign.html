@@ -1,0 +1,221 @@
+<!-- ===== Modified by Sathya - START ===== -->
+
+<template>
+    <lightning-card title="Lead Reassignment (Team Leader)">
+        <div class="container slds-p-around_medium">
+
+            <template if:true={isLoading}>
+                <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+            </template>
+
+            <!-- ROW 1 -->
+            <div class="slds-grid slds-gutters">
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-input
+                        type="number"
+                        label="Reassign Lead Count"
+                        min="1"
+                        data-count-input="true"
+                        value={reassignCount}
+                        onchange={handleReassignCountChange}
+                        onblur={handleReassignCountBlur}>
+                    </lightning-input>
+                </div>
+
+                <div class="slds-col slds-size_6-of-12 slds-align-bottom">
+                    <lightning-button
+                        label="Reassign Leads"
+                        variant="brand"
+                        onclick={handleReassign}
+                        disabled={isLoading}>
+                    </lightning-button>
+                </div>
+            </div>
+
+            <!-- ROW 2 -->
+            <div class="slds-grid slds-gutters slds-m-top_small">
+                <div class="slds-col slds-size_4-of-12">
+                    <lightning-combobox
+                        label="Lead Status"
+                        value={selectedStatus}
+                        options={statusOptions}
+                        onchange={handleStatusChange}
+                        disabled={isLoading}>
+                    </lightning-combobox>
+                </div>
+
+                <div class="slds-col slds-size_4-of-12">
+                    <lightning-dual-listbox
+                        name="dropOffReasons"
+                        label="Drop Off Reasons"
+                        source-label="Available"
+                        selected-label="Selected"
+                        field-level-help="Select one or more statuses"
+                        options={dropOffOptions}
+                        value={dropOffStatus}
+                        onchange={handleDropOffChange}>
+                    </lightning-dual-listbox>
+                </div>
+
+                <div class="slds-col slds-size_4-of-12">
+                    <lightning-input
+                        type="search"
+                        label="Search by Lead ID"
+                        placeholder="Search Lead ID..."
+                        onchange={handleSearchKeyChange}
+                        disabled={isLoading}>
+                    </lightning-input>
+                </div>
+            </div>
+
+            <!-- ALLOCATED PROJECTS -->
+            <div class="slds-grid slds-gutters slds-m-top_small">
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-dual-listbox
+                        name="allocatedProjects"
+                        label="Allocated Projects"
+                        source-label="Available"
+                        selected-label="Selected"
+                        field-level-help="Only shows projects present in the selected users' leads"
+                        options={projectOptions}
+                        value={selectedProjects}
+                        onchange={handleProjectChange}
+                        disabled={isLoading}>
+                    </lightning-dual-listbox>
+                </div>
+            </div>
+
+            <!-- Recovery date -->
+            <div class="slds-grid slds-gutters slds-m-top_small">
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-input
+                        type="date"
+                        label="Recovery From Date"
+                        value={fromDate}
+                        onchange={handleFromDateChange}
+                        disabled={isLoading}>
+                    </lightning-input>
+                </div>
+
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-input
+                        type="date"
+                        label="Recovery To Date"
+                        value={toDate}
+                        onchange={handleToDateChange}
+                        disabled={isLoading}>
+                    </lightning-input>
+                </div>
+            </div>
+
+            <!-- ROW 3 -->
+            <div class="slds-grid slds-gutters slds-m-top_small">
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-dual-listbox
+                        label="From Users"
+                        options={userOptions}
+                        value={fromUserIds}
+                        onchange={handleFromUserChange}
+                        disabled={isLoading}>
+                    </lightning-dual-listbox>
+                </div>
+
+                <div class="slds-col slds-size_6-of-12">
+                    <lightning-dual-listbox
+                        label="To Users"
+                        options={userOptions}
+                        value={toUserIds}
+                        onchange={handleToUserChange}
+                        disabled={isLoading}>
+                    </lightning-dual-listbox>
+                </div>
+            </div>
+
+            <!-- SELECT ALL -->
+            <lightning-input
+                type="checkbox"
+                label="Select All Leads on Current Page"
+                data-select-all="true"
+                onchange={handleSelectAll}
+                class="slds-m-top_small"
+                disabled={isLoading}>
+            </lightning-input>
+
+            <!-- SELECTED COUNT -->
+            <div class="slds-m-top_small">
+                <strong>Selected Leads: {selectedCount}</strong>
+            </div>
+
+            <!-- TABLE -->
+            <template if:true={leads}>
+                <template if:true={leads.length}>
+                    <table class="slds-table slds-table_bordered slds-m-top_medium">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th>Lead ID</th>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>Allocated Project</th>
+                                <template if:true={leadStatus}>
+                                    <th>Recovery Date</th>
+                                    <th>Drop Off Reasons</th>
+                                </template>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template for:each={leads} for:item="lead">
+                                <tr key={lead.Id}>
+                                    <td>
+                                        <lightning-input
+                                            type="checkbox"
+                                            data-id={lead.Id}
+                                            onchange={handleCheckboxChange}
+                                            disabled={isLoading}>
+                                        </lightning-input>
+                                    </td>
+                                    <td>{lead.Lead_ID__c}</td>
+                                    <td>{lead.Name}</td>
+                                    <td>{lead.Lead_Status__c}</td>
+                                    <td>{lead.Allocated_Project__c}</td>
+
+                                    <template if:true={lead.RecoveryDate}>
+                                        <td>{lead.RecoveryDate}</td>
+                                        <td>{lead.Drop_off_Reasons__c}</td>
+                                    </template>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </template>
+
+                <template if:false={leads.length}>
+                    <div class="slds-m-top_medium slds-align_absolute-center">
+                        <p>No leads found.</p>
+                    </div>
+                </template>
+            </template>
+
+            <!-- PAGINATION -->
+            <div class="slds-m-top_medium slds-align_absolute-center">
+                <lightning-button
+                    label="Previous"
+                    onclick={handlePrev}
+                    disabled={disablePrev}>
+                </lightning-button>
+
+                <span class="slds-m-horizontal_medium">
+                    {pageInfo}
+                </span>
+
+                <lightning-button
+                    label="Next"
+                    onclick={handleNext}
+                    disabled={disableNext}>
+                </lightning-button>
+            </div>
+
+        </div>
+    </lightning-card>
+</template>
+<!-- ===== Modified by Sathya - END ===== -->
