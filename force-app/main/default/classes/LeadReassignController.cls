@@ -1,1649 +1,754 @@
-// public with sharing class LeadReassignController {   
+// /**
+//  * Author     : Sivam V
+//  * Class Name : LeadReassignController
+//  * Purpose    : Apex controller for the Lead Reassigner screen (leadReassign LWC).
+//  *              Lets a Team Leader see the leads of the users below them, filter those leads
+//  *              and move them evenly to one or more users. Recovery leads also get the field
+//  *              changes their new owner's profile needs. Leads that fail to save are returned
+//  *              with the reason, and every reassignment run is logged to Apex_Log__c
+//  *              (Request_Type__c = 'LeadReassignController'). When a run completes, its report
+//  *              is emailed to the MIS Sales and Pre-Sales TL users, the Salesforce Admin user
+//  *              and the fixed report addresses (sivam.v@adissia.com).
+//  * Date       : 15/10/2026
+//  */
+// public without sharing class LeadReassignController {
 
-//     /* =========================================================
-//        GET USERS (SUBORDINATES + CURRENT USER)
-//        ========================================================= */
+//     private static final Id RECOVERY_RECORD_TYPE_ID  = '012IS000000c3OBYAY';
+//     private static final Id PRE_SALES_RECORD_TYPE_ID = '012IS000000c1dOYAQ';
+//     private static final Id SVC_RECORD_TYPE_ID       = '012fu000001AprtAAC';
+
+//     private static final String  REASSIGN_LOG_REQUEST_TYPE = 'LeadReassignController';
+//     private static final Integer LOG_TEXT_LIMIT            = 32768;
+//     private static final String  LOG_TIME_FORMAT           = 'dd/MM/yyyy hh:mm:ss a';
+//     private static final String  LOG_TIME_ZONE             = 'Asia/Kolkata';
+
+//     private static final Set<String> REPORT_RECIPIENT_PROFILE_NAMES    = new Set<String>{ 'MIS Sales', 'Pre-Sales TL', 'CRE Head' };
+//     private static final String      REPORT_DEFAULT_RECIPIENT_USER_NAME = '';
+//     private static final Set<String> REPORT_FIXED_RECIPIENT_EMAILS      = new Set<String>{ }; // 'sivam.v@adissia.com'
+//     private static final String      REPORT_EMAIL_SUBJECT               = 'Lead Reassignment Report';
+// /**
+//      * Returns the active users the logged-in user can move leads between:
+//      * every user in a role below the logged-in user's role, plus the logged-in user.
+//      * @return active users, sorted by name
+//      */
 //     @AuraEnabled(cacheable=true)
 //     public static List<User> getUsers() {
-//         User me = [
-//             SELECT UserRoleId
-//             FROM User
-//             WHERE Id = :UserInfo.getUserId()
-//             LIMIT 1
-//         ];
+//         Id currentUserId = UserInfo.getUserId();
+//         User currentUser = [SELECT UserRoleId FROM User WHERE Id = :currentUserId LIMIT 1];
 
-//         Set<Id> roleIds = getSubordinateRoleIds(me.UserRoleId);
-//         roleIds.remove(me.UserRoleId);
+//         Set<Id> subordinateRoleIds = getSubordinateRoleIds(currentUser.UserRoleId);
+//         subordinateRoleIds.remove(currentUser.UserRoleId);
 
-//         return [
-//             SELECT Id, Name
-//             FROM User
-//             WHERE IsActive = true
-//             AND (UserRoleId IN :roleIds OR Id = :UserInfo.getUserId())
-//             ORDER BY Name
-//         ];
+//         return [SELECT Id, Name FROM User WHERE IsActive = true AND (UserRoleId IN :subordinateRoleIds OR Id = :currentUserId) ORDER BY Name];
+//     }
+    
+
+//     /**
+//      * Collects every role below the given role, at any depth.
+//      * @param parentRoleId role to start from
+//      * @return Ids of all roles under that role
+//      */
+//     private static Set<Id> getSubordinateRoleIds(Id parentRoleId) {
+//         Map<Id, UserRole> userRoleById = new Map<Id, UserRole>([SELECT Id, ParentRoleId FROM UserRole]);
+
+//         Set<Id> subordinateRoleIds = new Set<Id>();
+//         collectChildRoleIds(parentRoleId, userRoleById, subordinateRoleIds);
+//         return subordinateRoleIds;
 //     }
 
-//     /* =========================================================
-//        ROLE HIERARCHY HELPERS
-//        ========================================================= */
-//     private static Set<Id> getSubordinateRoleIds(Id rootRoleId) {
-//         Map<Id, UserRole> roleMap = new Map<Id, UserRole>([
-//             SELECT Id, ParentRoleId
-//             FROM UserRole
-//         ]);
-
-//         Set<Id> result = new Set<Id>();
-//         collectRoles(rootRoleId, roleMap, result);
-//         return result;
-//     }
-
-//     private static void collectRoles(
-//         Id parentId,
-//         Map<Id, UserRole> roleMap,
-//         Set<Id> result
-//     ) {
-//         for (UserRole r : roleMap.values()) {
-//             if (r.ParentRoleId == parentId && !result.contains(r.Id)) {
-//                 result.add(r.Id);
-//                 collectRoles(r.Id, roleMap, result);
+//     /**
+//      * Adds the direct child roles of a role to the collected set, then does the same for each child.
+//      * @param parentRoleId       role whose child roles are collected
+//      * @param userRoleById       all roles in the org, by Id
+//      * @param subordinateRoleIds role Ids collected so far (filled in by this method)
+//      */
+//     private static void collectChildRoleIds(Id parentRoleId, Map<Id, UserRole> userRoleById, Set<Id> subordinateRoleIds) {
+//         for (UserRole userRole : userRoleById.values()) {
+//             if (userRole.ParentRoleId == parentRoleId && !subordinateRoleIds.contains(userRole.Id)) {
+//                 subordinateRoleIds.add(userRole.Id);
+//                 collectChildRoleIds(userRole.Id, userRoleById, subordinateRoleIds);
 //             }
 //         }
 //     }
 
-//     /* =========================================================
-//        LEAD STATUS PICKLIST
-//        ========================================================= */
+//     /**
+//      * Returns the active values of the Lead Status picklist, for the Lead Status filter.
+//      * @return active Lead Status values
+//      */
 //     @AuraEnabled(cacheable=true)
 //     public static List<String> getLeadStatusPicklistValues() {
-//         List<String> values = new List<String>();
-//         for (Schema.PicklistEntry p :
-//             Lead.Lead_Status__c.getDescribe().getPicklistValues()) {
-//             if (p.isActive()) {
-//                 values.add(p.getValue());
-//             }
-//         }
-//         return values;
+//         return getActivePicklistValues(Lead.Lead_Status__c.getDescribe().getPicklistValues());
 //     }
 
+//     /**
+//      * Returns the active values of the Drop Off Reasons picklist, for the Drop Off Reasons filter.
+//      * @return active Drop Off Reasons values
+//      */
 //     @AuraEnabled(cacheable=true)
 //     public static List<String> getDropOffReasonsPicklistValues() {
-//         List<String> values = new List<String>();
-//         for (Schema.PicklistEntry p :
-//             Lead.Drop_off_Reasons__c.getDescribe().getPicklistValues()) {
-//             if (p.isActive()) {
-//                 values.add(p.getValue());
-//             }
-//         }
-//         return values;
+//         return getActivePicklistValues(Lead.Drop_off_Reasons__c.getDescribe().getPicklistValues());
 //     }
 
-//     /* =========================================================
-//        GET DISTINCT ALLOCATED PROJECTS (for current owner + status)
-//        ========================================================= */
-//     /* ===== Sathya - START : Get distinct allocated projects ===== */
+//     /**
+//      * Keeps only the active entries of a picklist.
+//      * @param picklistEntries all entries of the picklist
+//      * @return values of the active entries, in picklist order
+//      */
+//     private static List<String> getActivePicklistValues(List<Schema.PicklistEntry> picklistEntries) {
+//         List<String> activePicklistValues = new List<String>();
+//         for (Schema.PicklistEntry picklistEntry : picklistEntries) {
+//             if (picklistEntry.isActive()) {
+//                 activePicklistValues.add(picklistEntry.getValue());
+//             }
+//         }
+//         return activePicklistValues;
+//     }
+
+//     /**
+//      * Returns the distinct Allocated Project values on the selected users' leads,
+//      * for the Allocated Projects filter. For a Recovery status, only leads that have been in
+//      * recovery for at least the days in the Recovery_Reassign_Days label are counted.
+//      * @param ownerIds users whose leads are checked (the From Users)
+//      * @param status   selected Lead Status, or 'ALL'
+//      * @return allocated project values, sorted
+//      */
 //     @AuraEnabled
-//     public static List<String> getAllocatedProjects(
-//         List<Id> ownerIds,
-//         String status
-//     ) {
+//     public static List<String> getAllocatedProjects(List<Id> ownerIds, String status) {
 //         if (ownerIds == null || ownerIds.isEmpty()) {
 //             return new List<String>();
 //         }
 
-//         Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-//         Date limitDate = Date.today().addDays(-recoveryDays);
+//         Integer recoveryReassignDays = Integer.valueOf(Label.Recovery_Reassign_Days);
+//         Date recoveryCutoffDate = Date.today().addDays(-recoveryReassignDays);
 
-//         String q =
-//             'SELECT Allocated_Project__c ' +
-//             'FROM Lead ' +
-//             'WHERE OwnerId IN :ownerIds ' +
-//             'AND Allocated_Project__c != null';
+//         String allocatedProjectQuery = 'SELECT Allocated_Project__c FROM Lead WHERE OwnerId IN :ownerIds AND Allocated_Project__c != null';
+//         if (String.isNotBlank(status) && status != 'ALL') allocatedProjectQuery += ' AND Lead_Status__c = :status';
 
-//         if (String.isNotBlank(status) && status != 'ALL') {
-//             q += ' AND Lead_Status__c = :status';
-//         }
 //         if (status == 'Recovery - Pre Sales') {
-//             q += ' AND Unqualified_Date__c <= :limitDate';
+//             allocatedProjectQuery += ' AND Unqualified_Date__c <= :recoveryCutoffDate';
 //         } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//             q += ' AND Closed_Lost_Date__c <= :limitDate';
+//             allocatedProjectQuery += ' AND Closed_Lost_Date__c <= :recoveryCutoffDate';
 //         }
+//         allocatedProjectQuery += ' GROUP BY Allocated_Project__c ORDER BY Allocated_Project__c';
 
-//         q += ' GROUP BY Allocated_Project__c ORDER BY Allocated_Project__c';
-
-//         Set<String> projects = new Set<String>();
-//         for (AggregateResult ar : Database.query(q)) {
-//             String val = (String) ar.get('Allocated_Project__c');
-//             if (String.isNotBlank(val)) projects.add(val);
+//         Set<String> allocatedProjects = new Set<String>();
+//         for (AggregateResult projectResult : Database.query(allocatedProjectQuery)) {
+//             String allocatedProject = (String) projectResult.get('Allocated_Project__c');
+//             if (String.isNotBlank(allocatedProject)) allocatedProjects.add(allocatedProject);
 //         }
-//         return new List<String>(projects);
+//         return new List<String>(allocatedProjects);
 //     }
-//     /* ===== Sathya - END : Get distinct allocated projects ===== */
 
-//     /* ===== Added By Sathya - START : Campaign / Sub Campaign filter options ===== */
+//     /**
+//      * Returns one page of the selected users' leads, with all the screen's filters applied,
+//      * plus the total number of matching leads for the page count.
+//      * For a Recovery status, only leads that have been in recovery for at least the days in the
+//      * Recovery_Reassign_Days label are shown, and the Recovery From / To dates filter on the
+//      * Unqualified Date (Recovery - Pre Sales) or the Closed Lost Date (Recovery - Sales / SVC).
+//      * @param ownerIds   users whose leads are listed (the From Users)
+//      * @param fromDate   Recovery From Date, or null
+//      * @param toDate     Recovery To Date, or null
+//      * @param status     selected Lead Status, or 'ALL'
+//      * @param dropStatus selected Drop Off Reasons, or empty
+//      * @param projects   selected Allocated Projects, or empty
+//      * @param searchKey  part of a Lead ID to search for, or blank
+//      * @param pageSize   leads per page (50 when not given)
+//      * @param pageNumber page to return, starting at 1
+//      * @return the leads on the page and the total number of matching leads
+//      */
 //     @AuraEnabled
-//     public static List<OptionWrapper> getCampaignOptions(List<Id> ownerIds) {
-//         List<OptionWrapper> options = new List<OptionWrapper>();
-//         if (ownerIds == null || ownerIds.isEmpty()) {
-//             return options;
-//         }
-//         for (AggregateResult aggregateRow : [SELECT Campaign_std__c campaignId, Campaign_std__r.Name campaignName FROM Lead WHERE OwnerId IN :ownerIds AND Campaign_std__c != null GROUP BY Campaign_std__c, Campaign_std__r.Name ORDER BY Campaign_std__r.Name]) {
-//             options.add(new OptionWrapper((Id) aggregateRow.get('campaignId'), (String) aggregateRow.get('campaignName')));
-//         }
-//         return options;
-//     }
-
-//     @AuraEnabled
-//     public static List<OptionWrapper> getSubCampaignOptions(List<Id> ownerIds, Id campaignId) {
-//         List<OptionWrapper> options = new List<OptionWrapper>();
-//         if (ownerIds == null || ownerIds.isEmpty()) {
-//             return options;
-//         }
-//         String q = 'SELECT Sub_Campaign__c subCampaignId, Sub_Campaign__r.Name subCampaignName FROM Lead WHERE OwnerId IN :ownerIds AND Sub_Campaign__c != null';
-//         if (campaignId != null) {
-//             q += ' AND Campaign_std__c = :campaignId';
-//         }
-//         q += ' GROUP BY Sub_Campaign__c, Sub_Campaign__r.Name ORDER BY Sub_Campaign__r.Name';
-//         for (AggregateResult aggregateRow : Database.query(q)) {
-//             options.add(new OptionWrapper((Id) aggregateRow.get('subCampaignId'), (String) aggregateRow.get('subCampaignName')));
-//         }
-//         return options;
-//     }
-
-//     /*
-//        Activity filter clause builder.
-//        activityFilter values: 'NFA', 'Untouched', 'Missed Call' (anything else = no extra filter).
-//        Binds used (:nowDateTime, :startOfToday) must be declared in the calling method.
-//     */
-//     private static String buildActivityFilterClause(String activityFilter) {
-//         if (activityFilter == 'NFA') {
-//             return ' AND (Next_Followup_Date__c = null OR Next_Followup_Date__c < :nowDateTime)' +
-//                    ' AND (Next_Scheduled_Date__c = null OR Next_Scheduled_Date__c < :nowDateTime)';
-//         }
-//         if (activityFilter == 'Untouched') {
-//             return ' AND RecordType.Name = \'Pre Sales\'' +
-//                    ' AND Lead_Status__c IN (\'New Enquiry\', \'Unable to connect\', \'Follow Up\')' +
-//                    ' AND Followup_Scheduled__c = false' +
-//                    ' AND (pre_sales_last_attempt__c = null OR pre_sales_last_attempt__c < :startOfToday)';
-//         }
-//         if (activityFilter == 'Missed Call') {
-//             return ' AND Id IN (SELECT Lead__c FROM Call_Detail__c WHERE Call_Type__c = \'Inbound Call\' AND Status__c IN (\'BUSY\', \'CANCEL\', \'NOANSWER\') AND Is_Called_Back__c = false)';
-//         }
-//         return '';
-//     }
-//     /* ===== Added By Sathya - END : Campaign / Sub Campaign filter options ===== */
-
-//     /* =========================================================
-//        GET LEADS BY OWNER + STATUS + PROJECT (with pagination)
-//        ========================================================= */
-//     @AuraEnabled
-//     public static LeadResult getLeadsByOwner(
-//         List<Id> ownerIds,
-//         Date fromDate,
-//         Date toDate,
-//         String status,
-//         List<String> dropStatus,
-//         List<String> projects,
-//         String searchKey,
-//         Integer pageSize,
-//         Integer pageNumber,
-//         Id campaignId,
-//         Id subCampaignId,
-//         String activityFilter
-//     ) {
+//     public static LeadResult getLeadsByOwner(List<Id> ownerIds, Date fromDate, Date toDate, String status, List<String> dropStatus, List<String> projects, String searchKey, Integer pageSize, Integer pageNumber) {
 //         try {
 //             if (ownerIds == null || ownerIds.isEmpty()) {
 //                 return new LeadResult(new List<Lead>(), 0);
 //             }
 
-//             Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-//             Date limitDate = Date.today().addDays(-recoveryDays);
+//             Integer recoveryReassignDays = Integer.valueOf(Label.Recovery_Reassign_Days);
+//             Date recoveryCutoffDate = Date.today().addDays(-recoveryReassignDays);
 
-//             if (pageSize == null || pageSize <= 0)    pageSize   = 50;
+//             if (pageSize == null || pageSize <= 0) pageSize = 50;
 //             if (pageNumber == null || pageNumber < 1) pageNumber = 1;
+//             Integer recordOffset = (pageNumber - 1) * pageSize;
 
-//             Integer offset = (pageNumber - 1) * pageSize;
-
-//             Boolean hasDropFilter    = dropStatus != null && !dropStatus.isEmpty();
+//             Boolean hasDropOffReasonFilter = dropStatus != null && !dropStatus.isEmpty();
 //             Boolean hasProjectFilter = projects != null && !projects.isEmpty();
+//             String leadIdSearchPattern = '%' + searchKey + '%';
 
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filter binds ===== */
-//             DateTime nowDateTime  = System.now();
-//             DateTime startOfToday = DateTime.newInstance(Date.today(), Time.newInstance(0, 0, 0, 0));
-//             String activityClause = buildActivityFilterClause(activityFilter);
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filter binds ===== */
+//             // Filters shared by the lead list and the lead count
+//             String leadFilterClause = ' WHERE OwnerId IN :ownerIds';
+//             if (hasDropOffReasonFilter) leadFilterClause += ' AND Drop_off_Reasons__c IN :dropStatus';
+//             if (hasProjectFilter) leadFilterClause += ' AND Allocated_Project__c IN :projects';
+//             if (String.isNotBlank(status) && status != 'ALL') leadFilterClause += ' AND Lead_Status__c = :status';
+//             if (String.isNotBlank(searchKey)) leadFilterClause += ' AND Lead_ID__c LIKE :leadIdSearchPattern';
 
-//             // --- Data query ---
-//             String query =
-//                 'SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId, ' +
-//                 'Allocated_Project__c, Campaign_std__r.Name, Sub_Campaign__r.Name, ' +
-//                 'Drop_off_Reasons__c, FORMAT(Unqualified_Date__c), FORMAT(Closed_Lost_Date__c) ' +
-//                 'FROM Lead WHERE OwnerId IN :ownerIds';
-
-//             if (hasDropFilter)                                    query += ' AND Drop_off_Reasons__c IN :dropStatus';
-//             if (hasProjectFilter)                                 query += ' AND Allocated_Project__c IN :projects';
-//             if (String.isNotBlank(status) && status != 'ALL')    query += ' AND Lead_Status__c = :status';
-//             if (String.isNotBlank(searchKey)) {
-//                 String searchPattern = '%' + searchKey + '%';
-//                 query += ' AND Lead_ID__c LIKE :searchPattern';
-//             }
-
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filters (data query) ===== */
-//             if (campaignId != null)    query += ' AND Campaign_std__c = :campaignId';
-//             if (subCampaignId != null) query += ' AND Sub_Campaign__c = :subCampaignId';
-//             query += activityClause;
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filters (data query) ===== */
+//             String leadQuery = 'SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId, Allocated_Project__c, Drop_off_Reasons__c, FORMAT(Unqualified_Date__c), FORMAT(Closed_Lost_Date__c) FROM Lead' + leadFilterClause;
+//             String leadCountQuery = 'SELECT COUNT() FROM Lead' + leadFilterClause;
 
 //             if (status == 'Recovery - Pre Sales') {
-//                 query += ' AND Unqualified_Date__c <= :limitDate';
-//                 if (fromDate != null) query += ' AND Unqualified_Date__c >= :fromDate';
-//                 if (toDate   != null) query += ' AND Unqualified_Date__c <= :toDate';
-//                 query += ' ORDER BY Unqualified_Date__c DESC';
+//                 String unqualifiedDateClause = ' AND Unqualified_Date__c <= :recoveryCutoffDate';
+//                 if (fromDate != null) unqualifiedDateClause += ' AND Unqualified_Date__c >= :fromDate';
+//                 if (toDate != null) unqualifiedDateClause += ' AND Unqualified_Date__c <= :toDate';
 
+//                 leadQuery += unqualifiedDateClause + ' ORDER BY Unqualified_Date__c DESC';
+//                 leadCountQuery += unqualifiedDateClause;
 //             } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//                 if(fromDate == null && toDate == null){
-//                     query += ' AND Closed_Lost_Date__c <= :limitDate'; 
-//                 }
-//                 if (fromDate != null) query += ' AND Closed_Lost_Date__c >= :fromDate';
-//                 if (toDate   != null) query += ' AND Closed_Lost_Date__c <= :toDate';
-//                 query += ' ORDER BY Closed_Lost_Date__c DESC';
+//                 String closedLostDateRangeClause = '';
+//                 if (fromDate != null) closedLostDateRangeClause += ' AND Closed_Lost_Date__c >= :fromDate';
+//                 if (toDate != null) closedLostDateRangeClause += ' AND Closed_Lost_Date__c <= :toDate';
 
+//                 // The lead list applies the recovery cut-off only when no date range is given; the count always applies it
+//                 String listRecoveryCutoffClause = (fromDate == null && toDate == null) ? ' AND Closed_Lost_Date__c <= :recoveryCutoffDate' : '';
+//                 leadQuery += listRecoveryCutoffClause + closedLostDateRangeClause + ' ORDER BY Closed_Lost_Date__c DESC';
+//                 leadCountQuery += ' AND Closed_Lost_Date__c <= :recoveryCutoffDate' + closedLostDateRangeClause;
 //             } else {
-//                 query += ' ORDER BY CreatedDate DESC';
+//                 leadQuery += ' ORDER BY CreatedDate DESC';
 //             }
+//             leadQuery += ' LIMIT :pageSize OFFSET :recordOffset';
 
-//             query += ' LIMIT :pageSize OFFSET :offset';
-
-//             // --- Count query ---
-//             String countQuery =
-//                 'SELECT COUNT() FROM Lead WHERE OwnerId IN :ownerIds';
-
-//             if (hasDropFilter)                                    countQuery += ' AND Drop_off_Reasons__c IN :dropStatus';
-//             if (hasProjectFilter)                                 countQuery += ' AND Allocated_Project__c IN :projects';
-//             if (String.isNotBlank(status) && status != 'ALL')    countQuery += ' AND Lead_Status__c = :status';
-//             if (String.isNotBlank(searchKey)) {
-//                 String searchPattern = '%' + searchKey + '%';
-//                 countQuery += ' AND Lead_ID__c LIKE :searchPattern';
-//             }
-
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filters (count query) ===== */
-//             if (campaignId != null)    countQuery += ' AND Campaign_std__c = :campaignId';
-//             if (subCampaignId != null) countQuery += ' AND Sub_Campaign__c = :subCampaignId';
-//             countQuery += activityClause;
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filters (count query) ===== */
-
-//             if (status == 'Recovery - Pre Sales') {
-//                 countQuery += ' AND Unqualified_Date__c <= :limitDate';
-//                 if (fromDate != null) countQuery += ' AND Unqualified_Date__c >= :fromDate';
-//                 if (toDate   != null) countQuery += ' AND Unqualified_Date__c <= :toDate';
-
-//             } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//                 countQuery += ' AND Closed_Lost_Date__c <= :limitDate';
-//                 if (fromDate != null) countQuery += ' AND Closed_Lost_Date__c >= :fromDate';
-//                 if (toDate   != null) countQuery += ' AND Closed_Lost_Date__c <= :toDate';
-//             }
-
-//             List<Lead> leads    = Database.query(query);
-//             Integer totalCount  = Database.countQuery(countQuery);
-
-//             return new LeadResult(leads, totalCount);
-
-//         } catch (Exception ex) {
-//             System.debug('getLeadsByOwner error: ' + ex.getMessage() + ' | ' + ex.getStackTraceString());
+//             List<Lead> matchingLeads = Database.query(leadQuery);
+//             Integer totalLeadCount = Database.countQuery(leadCountQuery);
+//             return new LeadResult(matchingLeads, totalLeadCount);
+//         } catch (Exception caughtException) {
+//             System.debug('getLeadsByOwner error: ' + caughtException.getMessage() + ' | ' + caughtException.getStackTraceString());
 //             return new LeadResult(new List<Lead>(), 0);
 //         }
 //     }
 
-//     /* =========================================================
-//        SEARCH LEADS BY LEAD ID
-//        ========================================================= */
+//     /**
+//      * Finds the selected users' leads whose Lead ID contains the search text.
+//      * @param ownerIds   users whose leads are searched
+//      * @param searchKey  part of a Lead ID
+//      * @param limitCount maximum number of leads to return (100 when not given)
+//      * @return matching leads, newest first
+//      */
 //     @AuraEnabled
-//     public static List<Lead> searchLeadsByLeadId(
-//         List<Id> ownerIds,
-//         String searchKey,
-//         Integer limitCount
-//     ) {
+//     public static List<Lead> searchLeadsByLeadId(List<Id> ownerIds, String searchKey, Integer limitCount) {
 //         if (ownerIds == null || ownerIds.isEmpty() || String.isBlank(searchKey)) {
 //             return new List<Lead>();
 //         }
-
 //         if (limitCount == null || limitCount <= 0) limitCount = 100;
 
-//         String searchPattern = '%' + searchKey + '%';
-
-//         return [
-//             SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId
-//             FROM Lead
-//             WHERE OwnerId IN :ownerIds
-//             AND Lead_ID__c LIKE :searchPattern
-//             ORDER BY CreatedDate DESC
-//             LIMIT :limitCount
-//         ];
+//         String leadIdSearchPattern = '%' + searchKey + '%';
+//         return [SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId FROM Lead WHERE OwnerId IN :ownerIds AND Lead_ID__c LIKE :leadIdSearchPattern ORDER BY CreatedDate DESC LIMIT :limitCount];
 //     }
 
-//     /* =========================================================
-//        REASSIGN LEADS
-//        ========================================================= */
-//     /* ===== Sathya - START : */
+//     /**
+//      * Reassigns the given leads round robin across the given users, in the order the leads are
+//      * received: lead 1 to user 1, lead 2 to user 2, and back to user 1 after the last user.
+//      * The screen uses reassignLeadsWithOwnerMap; this method is kept for callers that send
+//      * a plain list of users.
+//      * @param leadIds     leads to reassign
+//      * @param newOwnerIds users to share the leads between
+//      */
 //     @AuraEnabled
-//     public static void reassignLeads(
-//         List<Id> leadIds,
-//         List<Id> newOwnerIds
-//     ) {
-//         if (leadIds == null || leadIds.isEmpty()) return;
-//         if (newOwnerIds == null || newOwnerIds.isEmpty()) return;
-
-//         Id RECOVERY_RT_ID     = '012IS000000c3OBYAY';
-//         Id PRESALES_RT_ID     = '012IS000000c1dOYAQ';
-//         Id RECOVERY_SVC_RT_ID = '012IS000000c3OBYAY';
-//         Id SVC_RT_ID          = '012fu000001AprtAAC';
-
-//         Set<Id> uniqueLeadIds = new Set<Id>(leadIds);
-
-//         List<Lead> leads = [
-//             SELECT Id,
-//                    OwnerId,
-//                    RecordTypeId,
-//                    Lead_Status__c,
-//                    Is_Unqualified__c,
-//                    Unqualified_Date__c,
-//                    Unqualified_Lost_By__c,
-//                    Unqualified_Reason__c,
-//                    Recovery_Reassigned_Date__c,
-//                    Recovery_User__c,
-//                    Lead_ID__c,
-//                    Lead_ReAssigned_Date__c,
-//                    Previous_Presales_user__c,
-//                    Reassigned_By__c,
-//                    Lead_ReAssigned_Dates__c,
-//                    Owner.Name
-//             FROM Lead
-//             WHERE Id IN :uniqueLeadIds
-//         ];
-
-//         Map<Id, User> userMap = new Map<Id, User>(
-//             [SELECT Id, Profile.Name
-//              FROM User
-//              WHERE Id IN :newOwnerIds]
-//         );
-
-//         Integer index  = 0;
-//         Integer size   = newOwnerIds.size();
-//         List<Lead> updates = new List<Lead>();
-
-//         for (Lead ld : leads) {
-
-//             Id     oldOwnerId = ld.OwnerId;
-//             String ownerName  = ld.Owner.Name;
-
-//             ld.OwnerId                   = newOwnerIds[index];
-//             ld.Lead_ReAssigned_Dates__c  = System.now();
-//             ld.Previous_Presales_user__c = oldOwnerId;
-//             ld.Reassigned_By__c          = UserInfo.getUserId();
-
-//             /* ===== Added By Sathya - START : Last reassigned date + last reassigner (screen reassign only) ===== */
-//             ld.Last_Reassigned_Date__c   = System.now();
-//             ld.Last_Reassigner_Name__c   = UserInfo.getUserId();
-//             /* ===== Added By Sathya - END : Last reassigned date + last reassigner ===== */
-
-//             User   targetUser  = userMap.get(newOwnerIds[index]);
-//             String profileName = (targetUser != null) ? targetUser.Profile.Name : '';
-
-//             if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Recovery') {
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Lead_ReAssigned_Date__c     = Date.today();
-//                 ld.Previous_Lead_owner__c      = ownerName;
-//                 ld.Is_Lead_ReAssigned__c       = true;
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-//             else if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Pre Sales') {
-//                 ld.RecordTypeId                = PRESALES_RT_ID;
-//                 ld.Lead_Status__c              = 'Unable to connect';
-//                 ld.Previous_Lead_owner__c      = ownerName;
-//                 ld.Lead_ReAssigned_Date__c     = Date.today();
-//                 ld.Is_Lead_ReAssigned__c       = true;
-//                 ld.Is_Unqualified__c           = false;
-//                 ld.Unqualified_Date__c         = null;
-//                 ld.Unqualified_Lost_By__c      = null;
-//                 ld.Unqualified_Reason__c       = null;
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-//             else if (ld.RecordTypeId == RECOVERY_SVC_RT_ID && profileName == 'SVC Team') {
-//                 ld.RecordTypeId                = SVC_RT_ID;
-//                 ld.Lead_Status__c              = 'Allocate to SVC';
-//                 ld.Is_Unqualified__c           = false;
-//                 ld.Unqualified_Date__c         = null;
-//                 ld.Unqualified_Lost_By__c      = null;
-//                 ld.Unqualified_Reason__c       = null;
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-
-//             updates.add(ld);
-//             index++;
-//             if (index == size) index = 0;
+//     public static void reassignLeads(List<Id> leadIds, List<Id> newOwnerIds) {
+//         if (leadIds == null || leadIds.isEmpty() || newOwnerIds == null || newOwnerIds.isEmpty()) {
+//             return;
 //         }
 
-//         if (!updates.isEmpty()) {
-//             Database.update(updates, false);
+//         Map<Id, Id> newOwnerIdByLeadId = new Map<Id, Id>();
+//         for (Id leadId : leadIds) {
+//             if (!newOwnerIdByLeadId.containsKey(leadId)) {
+//                 Integer ownerPosition = Math.mod(newOwnerIdByLeadId.size(), newOwnerIds.size());
+//                 newOwnerIdByLeadId.put(leadId, newOwnerIds[ownerPosition]);
+//             }
 //         }
-//            integer i=1;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
+//         applyReassignment(newOwnerIdByLeadId);
 //     }
-//     /* ===== Sathya - END : */
 
-//     /* =========================================================
-//        WRAPPER CLASS
-//        ========================================================= */
+//     /**
+//      * Reassigns each lead to the owner the screen chose for it. The screen decides every
+//      * lead's owner before it sends the leads in batches, so the split stays even for any
+//      * number of users.
+//      * @param leadOwnerMap new owner Id for each lead Id, for one batch
+//      * @return one message per lead that failed to save, as "Lead ID: reason"
+//      */
+//     @AuraEnabled
+//     public static List<String> reassignLeadsWithOwnerMap(Map<String, String> leadOwnerMap) {
+//         if (leadOwnerMap == null || leadOwnerMap.isEmpty()) {
+//             return new List<String>();
+//         }
+
+//         Map<Id, Id> newOwnerIdByLeadId = new Map<Id, Id>();
+//         for (String leadId : leadOwnerMap.keySet()) {
+//             String newOwnerId = leadOwnerMap.get(leadId);
+//             if (String.isNotBlank(leadId) && String.isNotBlank(newOwnerId)) {
+//                 newOwnerIdByLeadId.put(Id.valueOf(leadId), Id.valueOf(newOwnerId));
+//             }
+//         }
+//         return applyReassignment(newOwnerIdByLeadId);
+//     }
+
+//     /**
+//      * Moves each lead to its new owner and stamps who reassigned it and when. Recovery leads
+//      * also get the changes their new owner's profile needs (see applyRecoveryLeadRules).
+//      * Saves with partial success, so one lead that fails does not stop the others.
+//      * @param newOwnerIdByLeadId new owner Id for each lead Id
+//      * @return one message per lead that failed to save, as "Lead ID: reason"
+//      */
+//     private static List<String> applyReassignment(Map<Id, Id> newOwnerIdByLeadId) {
+//         List<String> failureMessages = new List<String>();
+//         if (newOwnerIdByLeadId == null || newOwnerIdByLeadId.isEmpty()) {
+//             return failureMessages;
+//         }
+
+//         Set<Id> leadIds = newOwnerIdByLeadId.keySet();
+//         Set<Id> newOwnerIds = new Set<Id>(newOwnerIdByLeadId.values());
+//         Id currentUserId = UserInfo.getUserId();
+
+//         List<Lead> leadsToReassign = [SELECT Id, OwnerId, RecordTypeId, Lead_Status__c, Is_Unqualified__c, Unqualified_Date__c, Unqualified_Lost_By__c, Unqualified_Reason__c, Recovery_Reassigned_Date__c, Recovery_User__c, Lead_ID__c, Lead_ReAssigned_Date__c, Previous_Presales_user__c, Reassigned_By__c, Lead_ReAssigned_Dates__c, Owner.Name FROM Lead WHERE Id IN :leadIds];
+//         Map<Id, User> newOwnerById = new Map<Id, User>([SELECT Id, Profile.Name FROM User WHERE Id IN :newOwnerIds]);
+
+//         for (Lead leadToReassign : leadsToReassign) {
+//             Id newOwnerId = newOwnerIdByLeadId.get(leadToReassign.Id);
+//             String previousOwnerName = leadToReassign.Owner.Name;
+//             User newOwner = newOwnerById.get(newOwnerId);
+//             String newOwnerProfileName = (newOwner != null) ? newOwner.Profile.Name : '';
+
+//             leadToReassign.Previous_Presales_user__c = leadToReassign.OwnerId;
+//             leadToReassign.OwnerId                   = newOwnerId;
+//             leadToReassign.Lead_ReAssigned_Dates__c  = System.now();
+//             leadToReassign.Reassigned_By__c          = currentUserId;
+//             leadToReassign.Last_Reassigned_Date__c   = System.now();
+//             leadToReassign.Last_Reassigner_Name__c   = currentUserId;
+
+//             applyRecoveryLeadRules(leadToReassign, newOwnerProfileName, previousOwnerName);
+//         }
+
+//         if (!leadsToReassign.isEmpty()) {
+//             List<Database.SaveResult> saveResults = Database.update(leadsToReassign, false);
+//             for (Integer resultIndex = 0; resultIndex < saveResults.size(); resultIndex++) {
+//                 if (!saveResults[resultIndex].isSuccess()) {
+//                     List<Database.Error> saveErrors = saveResults[resultIndex].getErrors();
+//                     String errorMessage = saveErrors.isEmpty() ? 'Unknown error' : saveErrors[0].getMessage();
+//                     failureMessages.add(leadsToReassign[resultIndex].Lead_ID__c + ': ' + errorMessage);
+//                 }
+//             }
+//         }
+//         return failureMessages;
+//     }
+
+//     /**
+//      * Extra changes for a lead on the Recovery record type, based on its new owner's profile:
+//      *   Recovery  - stays a Recovery lead; the reassignment and push details are stamped.
+//      *   Pre Sales - becomes a Pre Sales lead in "Unable to connect"; unqualified details are cleared.
+//      *   SVC Team  - becomes an SVC lead in "Allocate to SVC"; unqualified details are cleared.
+//      * Leads on any other record type, or moved to any other profile, only change owner.
+//      * @param leadToReassign      lead being reassigned (changed in place)
+//      * @param newOwnerProfileName profile name of the new owner
+//      * @param previousOwnerName   name of the owner before this reassignment
+//      */
+//     private static void applyRecoveryLeadRules(Lead leadToReassign, String newOwnerProfileName, String previousOwnerName) {
+//         if (leadToReassign.RecordTypeId != RECOVERY_RECORD_TYPE_ID) {
+//             return;
+//         }
+
+//         if (newOwnerProfileName == 'Recovery') {
+//             leadToReassign.Lead_ReAssigned_Date__c = Date.today();
+//             leadToReassign.Previous_Lead_owner__c  = previousOwnerName;
+//             leadToReassign.Is_Lead_ReAssigned__c   = true;
+//             stampRecoveryPush(leadToReassign);
+//         } else if (newOwnerProfileName == 'Pre Sales') {
+//             leadToReassign.RecordTypeId            = PRE_SALES_RECORD_TYPE_ID;
+//             leadToReassign.Lead_Status__c          = 'Unable to connect';
+//             leadToReassign.Lead_ReAssigned_Date__c = Date.today();
+//             leadToReassign.Previous_Lead_owner__c  = previousOwnerName;
+//             leadToReassign.Is_Lead_ReAssigned__c   = true;
+//             clearUnqualifiedDetails(leadToReassign);
+//             stampRecoveryPush(leadToReassign);
+//         } else if (newOwnerProfileName == 'SVC Team') {
+//             leadToReassign.RecordTypeId   = SVC_RECORD_TYPE_ID;
+//             leadToReassign.Lead_Status__c = 'Allocate to SVC';
+//             clearUnqualifiedDetails(leadToReassign);
+//             stampRecoveryPush(leadToReassign);
+//         }
+//     }
+
+//     /**
+//      * Stamps when a Recovery lead was reassigned and pushed, and by whom.
+//      * @param leadToReassign lead being reassigned (changed in place)
+//      */
+//     private static void stampRecoveryPush(Lead leadToReassign) {
+//         leadToReassign.Recovery_Reassigned_Date__c = Date.today();
+//         leadToReassign.Pushed_On__c                = System.now();
+//         leadToReassign.Pushed_By__c                = UserInfo.getUserId();
+//     }
+
+//     /**
+//      * Clears the unqualified details of a Recovery lead that goes back into the Pre Sales or SVC flow.
+//      * @param leadToReassign lead being reassigned (changed in place)
+//      */
+//     private static void clearUnqualifiedDetails(Lead leadToReassign) {
+//         leadToReassign.Is_Unqualified__c      = false;
+//         leadToReassign.Unqualified_Date__c    = null;
+//         leadToReassign.Unqualified_Lost_By__c = null;
+//         leadToReassign.Unqualified_Reason__c  = null;
+//     }
+
+//     /**
+//      * Creates the Apex_Log__c record for a reassignment run, before the first batch is sent.
+//      * The log stays IN PROGRESS until completeReassignmentLog runs, so a log left IN PROGRESS
+//      * means the page was closed before the run finished.
+//      * @param requestJson run details from the screen: From / To users, filters and lead counts
+//      * @return Id of the new log record
+//      */
+//     @AuraEnabled
+//     public static Id startReassignmentLog(String requestJson) {
+//         Apex_Log__c reassignmentLog = new Apex_Log__c();
+//         reassignmentLog.Request_Type__c = REASSIGN_LOG_REQUEST_TYPE;
+//         reassignmentLog.Status__c       = 'IN PROGRESS';
+
+//         try {
+//             ReassignRequestWrapper runRequest = String.isBlank(requestJson) ? new ReassignRequestWrapper() : (ReassignRequestWrapper) JSON.deserialize(requestJson, ReassignRequestWrapper.class);
+//             runRequest.reassignedBy   = UserInfo.getName();
+//             runRequest.reassignedById = UserInfo.getUserId();
+//             runRequest.startedAt      = System.now().format(LOG_TIME_FORMAT, LOG_TIME_ZONE);
+//             reassignmentLog.Request__c = limitLogText(JSON.serializePretty(runRequest));
+//         } catch (Exception caughtException) {
+//             reassignmentLog.Request__c       = limitLogText(requestJson);
+//             reassignmentLog.Error_Message__c = limitLogText('Request could not be read: ' + caughtException.getMessage());
+//         }
+
+//         new ReassignmentLogWriter().saveLog(reassignmentLog);
+//         return reassignmentLog.Id;
+//     }
+
+//     /**
+//      * Completes the run log once the last batch has finished. The result is read back from
+//      * the leads themselves (not taken from the screen): how many were reassigned, how many
+//      * failed, how many stayed with the same owner, and how many each owner received.
+//      * Status becomes SUCCESS, PARTIAL (some leads failed) or FAIL (no lead was reassigned).
+//      * The run report is then emailed to the report recipients; an email problem is noted in
+//      * the response and never changes the log status.
+//      * @param logId           Id returned by startReassignmentLog
+//      * @param leadIds         every lead sent for reassignment in this run
+//      * @param failureMessages failed leads with their reason, as returned by the batches
+//      */
+//     @AuraEnabled
+//     public static void completeReassignmentLog(Id logId, List<Id> leadIds, List<String> failureMessages) {
+//         if (logId == null) {
+//             return;
+//         }
+
+//         ReassignmentLogWriter logWriter = new ReassignmentLogWriter();
+//         Apex_Log__c reassignmentLog = logWriter.getLog(logId);
+//         if (reassignmentLog == null) {
+//             return;
+//         }
+
+//         List<String> failedLeadMessages = (failureMessages == null) ? new List<String>() : failureMessages;
+//         Set<Id> sentLeadIds = (leadIds == null) ? new Set<Id>() : new Set<Id>(leadIds);
+
+//         try {
+//             Map<String, Integer> leadCountByOwnerName = new Map<String, Integer>();
+//             Integer reassignedLeadCount = 0;
+//             Integer sameOwnerLeadCount = 0;
+
+//             for (Lead reassignedLead : logWriter.getReassignedLeads(sentLeadIds, reassignmentLog.CreatedDate, UserInfo.getUserId())) {
+//                 reassignedLeadCount++;
+//                 String ownerName = (reassignedLead.Owner != null) ? reassignedLead.Owner.Name : String.valueOf(reassignedLead.OwnerId);
+//                 Integer ownerLeadCount = leadCountByOwnerName.containsKey(ownerName) ? leadCountByOwnerName.get(ownerName) : 0;
+//                 leadCountByOwnerName.put(ownerName, ownerLeadCount + 1);
+//                 if (String.valueOf(reassignedLead.OwnerId) == reassignedLead.Previous_Presales_user__c) sameOwnerLeadCount++;
+//             }
+
+//             ReassignResponseWrapper runResult = new ReassignResponseWrapper();
+//             runResult.completedAt        = System.now().format(LOG_TIME_FORMAT, LOG_TIME_ZONE);
+//             runResult.leadsSent          = sentLeadIds.size();
+//             runResult.leadsReassigned    = reassignedLeadCount;
+//             runResult.leadsFailed        = sentLeadIds.size() - reassignedLeadCount;
+//             runResult.leadsKeptSameOwner = sameOwnerLeadCount;
+//             runResult.splitByOwner       = leadCountByOwnerName;
+
+//             if (reassignedLeadCount == 0 && (!sentLeadIds.isEmpty() || !failedLeadMessages.isEmpty())) {
+//                 reassignmentLog.Status__c = 'FAIL';
+//             } else if (runResult.leadsFailed > 0 || !failedLeadMessages.isEmpty()) {
+//                 reassignmentLog.Status__c = 'PARTIAL';
+//             } else {
+//                 reassignmentLog.Status__c = 'SUCCESS';
+//             }
+
+//             if (!failedLeadMessages.isEmpty()) {
+//                 String earlierErrorMessage = String.isBlank(reassignmentLog.Error_Message__c) ? '' : reassignmentLog.Error_Message__c + '\n';
+//                 reassignmentLog.Error_Message__c = limitLogText(earlierErrorMessage + String.join(failedLeadMessages, '\n'));
+//             }
+
+//             // A run that sent nothing and failed nothing has no report to email
+//             if (!sentLeadIds.isEmpty() || !failedLeadMessages.isEmpty()) {
+//                 sendReassignmentReport(reassignmentLog, readRunRequest(reassignmentLog.Request__c), runResult, failedLeadMessages);
+//             }
+//             reassignmentLog.Response__c = limitLogText(JSON.serializePretty(runResult));
+//         } catch (Exception caughtException) {
+//             reassignmentLog.Response__c      = limitLogText(caughtException.getStackTraceString());
+//             reassignmentLog.Status__c        = 'FAIL';
+//             reassignmentLog.Error_Message__c = limitLogText(caughtException.getMessage() + (failedLeadMessages.isEmpty() ? '' : '\n' + String.join(failedLeadMessages, '\n')));
+//         }
+
+//         logWriter.saveLog(reassignmentLog);
+//     }
+
+//     /**
+//      * Cuts log text to the size the Apex_Log__c long text fields can hold.
+//      * @param logText text to save
+//      * @return the text, cut to 32,768 characters when longer
+//      */
+//     private static String limitLogText(String logText) {
+//         if (logText == null) return null;
+//         return (logText.length() > LOG_TEXT_LIMIT) ? logText.left(LOG_TEXT_LIMIT) : logText;
+//     }
+
+//     /**
+//      * Reads the run details saved by startReassignmentLog back from the log.
+//      * @param requestJson Apex_Log__c.Request__c of the run
+//      * @return the run details, or empty details when the text cannot be read
+//      */
+//     private static ReassignRequestWrapper readRunRequest(String requestJson) {
+//         try {
+//             if (String.isNotBlank(requestJson)) {
+//                 return (ReassignRequestWrapper) JSON.deserialize(requestJson, ReassignRequestWrapper.class);
+//             }
+//         } catch (Exception caughtException) {
+//             System.debug('readRunRequest error: ' + caughtException.getMessage());
+//         }
+//         return new ReassignRequestWrapper();
+//     }
+
+//     /**
+//      * Emails the run report to the report recipients (see getReportRecipientEmails).
+//      * The addresses the report went to, or the reason it could not be sent, are noted in the
+//      * run result so they appear in Apex_Log__c.Response__c. This method never throws.
+//      * @param reassignmentLog    the run's log, with its final status
+//      * @param runRequest         run details: From / To users and filters
+//      * @param runResult          run result: lead counts and the split by owner (updated in place)
+//      * @param failedLeadMessages failed leads with their reason
+//      */
+//     private static void sendReassignmentReport(Apex_Log__c reassignmentLog, ReassignRequestWrapper runRequest, ReassignResponseWrapper runResult, List<String> failedLeadMessages) {
+//         try {
+//             List<String> recipientEmails = getReportRecipientEmails();
+//             if (recipientEmails.isEmpty()) {
+//                 runResult.reportEmailError = 'No active user found for the report recipient profiles';
+//                 return;
+//             }
+
+//             Messaging.SingleEmailMessage reportEmail = new Messaging.SingleEmailMessage();
+//             reportEmail.setToAddresses(recipientEmails);
+//             reportEmail.setSubject(REPORT_EMAIL_SUBJECT + ' - ' + reassignmentLog.Status__c + ' - ' + runResult.leadsReassigned + ' of ' + runResult.leadsSent + ' leads reassigned by ' + UserInfo.getName());
+//             reportEmail.setHtmlBody(buildReportHtml(reassignmentLog, runRequest, runResult, failedLeadMessages));
+//             reportEmail.setSaveAsActivity(false);
+
+//             List<Messaging.SendEmailResult> sendResults = Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ reportEmail }, false);
+//             if (sendResults[0].isSuccess()) {
+//                 runResult.reportEmailedTo = recipientEmails;
+//             } else {
+//                 runResult.reportEmailError = sendResults[0].getErrors().isEmpty() ? 'Email could not be sent' : sendResults[0].getErrors()[0].getMessage();
+//             }
+//         } catch (Exception caughtException) {
+//             runResult.reportEmailError = caughtException.getMessage();
+//         }
+//     }
+
+//     /**
+//      * Returns the email addresses the run report is sent to: every active user on the
+//      * MIS Sales and Pre-Sales TL profiles, the Salesforce Admin user, and the fixed report
+//      * addresses that always receive it.
+//      * @return recipient email addresses, without duplicates
+//      */
+//     private static List<String> getReportRecipientEmails() {
+//         Set<String> recipientEmails = new Set<String>(REPORT_FIXED_RECIPIENT_EMAILS);
+//         for (User recipient : [SELECT Email FROM User WHERE IsActive = true AND (Profile.Name IN :REPORT_RECIPIENT_PROFILE_NAMES OR Name = :REPORT_DEFAULT_RECIPIENT_USER_NAME)]) {
+//             if (String.isNotBlank(recipient.Email)) recipientEmails.add(recipient.Email.toLowerCase());
+//         }
+//         return new List<String>(recipientEmails);
+//     }
+
+//     /**
+//      * Builds the HTML body of the run report: run summary, filters, From / To users,
+//      * leads received per user, failed leads with their reason, and a link to the log record.
+//      * @param reassignmentLog    the run's log, with its final status
+//      * @param runRequest         run details: From / To users and filters
+//      * @param runResult          run result: lead counts and the split by owner
+//      * @param failedLeadMessages failed leads with their reason
+//      * @return the report as HTML
+//      */
+//     private static String buildReportHtml(Apex_Log__c reassignmentLog, ReassignRequestWrapper runRequest, ReassignResponseWrapper runResult, List<String> failedLeadMessages) {
+//         ReassignFilterWrapper filters = (runRequest.filters == null) ? new ReassignFilterWrapper() : runRequest.filters;
+//         List<String> fromUsers = (runRequest.fromUsers == null) ? new List<String>() : runRequest.fromUsers;
+//         List<String> toUsers   = (runRequest.toUsers == null) ? new List<String>() : runRequest.toUsers;
+//         String logUrl = URL.getOrgDomainUrl().toExternalForm() + '/' + reassignmentLog.Id;
+
+//         String reportHtml = '<div style="font-family:Arial,sans-serif;font-size:13px;color:#222222">';
+//         reportHtml += '<h2 style="margin:0 0 10px 0">' + REPORT_EMAIL_SUBJECT + '</h2>';
+
+//         reportHtml += '<table cellpadding="5" cellspacing="0" style="border-collapse:collapse">';
+//         reportHtml += buildReportRow('Status', reassignmentLog.Status__c);
+//         reportHtml += buildReportRow('Reassigned By', UserInfo.getName());
+//         reportHtml += buildReportRow('Started At', runRequest.startedAt);
+//         reportHtml += buildReportRow('Completed At', runResult.completedAt);
+//         reportHtml += buildReportRow('Lead Status Filter', filters.leadStatus);
+//         reportHtml += buildReportRow('Drop Off Reasons', joinReportValues(filters.dropOffReasons));
+//         reportHtml += buildReportRow('Allocated Projects', joinReportValues(filters.allocatedProjects));
+//         reportHtml += buildReportRow('Lead ID Search', filters.searchKey);
+//         reportHtml += buildReportRow('Recovery From Date', filters.recoveryFromDate);
+//         reportHtml += buildReportRow('Recovery To Date', filters.recoveryToDate);
+//         reportHtml += buildReportRow('Leads Sent', String.valueOf(runResult.leadsSent));
+//         reportHtml += buildReportRow('Leads Reassigned', String.valueOf(runResult.leadsReassigned));
+//         reportHtml += buildReportRow('Leads Failed', String.valueOf(runResult.leadsFailed));
+//         reportHtml += buildReportRow('Leads Kept Same Owner', String.valueOf(runResult.leadsKeptSameOwner));
+//         reportHtml += '</table>';
+
+//         reportHtml += '<h3 style="margin:16px 0 4px 0">From Users (' + fromUsers.size() + ')</h3><p style="margin:0">' + formatReportValue(joinReportValues(fromUsers)) + '</p>';
+//         reportHtml += '<h3 style="margin:16px 0 4px 0">To Users (' + toUsers.size() + ')</h3><p style="margin:0">' + formatReportValue(joinReportValues(toUsers)) + '</p>';
+
+//         List<String> ownerNames = new List<String>(runResult.splitByOwner.keySet());
+//         ownerNames.sort();
+//         reportHtml += '<h3 style="margin:16px 0 4px 0">Leads Received Per User (' + ownerNames.size() + ')</h3>';
+//         if (ownerNames.isEmpty()) {
+//             reportHtml += '<p style="margin:0">-</p>';
+//         } else {
+//             reportHtml += '<table cellpadding="5" cellspacing="0" style="border-collapse:collapse"><tr><th style="border:1px solid #cccccc;text-align:left">User</th><th style="border:1px solid #cccccc;text-align:right">Leads</th></tr>';
+//             for (String ownerName : ownerNames) {
+//                 reportHtml += '<tr><td style="border:1px solid #cccccc">' + ownerName.escapeHtml4() + '</td><td style="border:1px solid #cccccc;text-align:right">' + runResult.splitByOwner.get(ownerName) + '</td></tr>';
+//             }
+//             reportHtml += '</table>';
+//         }
+
+//         reportHtml += '<h3 style="margin:16px 0 4px 0">Failed Leads (' + runResult.leadsFailed + ')</h3>';
+//         if (failedLeadMessages.isEmpty()) {
+//             reportHtml += '<p style="margin:0">' + ((runResult.leadsFailed > 0) ? runResult.leadsFailed + ' lead(s) were not reassigned and no reason was returned' : 'None') + '</p>';
+//         } else {
+//             reportHtml += '<ul style="margin:0">';
+//             for (String failedLeadMessage : failedLeadMessages) {
+//                 reportHtml += '<li>' + failedLeadMessage.escapeHtml4() + '</li>';
+//             }
+//             reportHtml += '</ul>';
+//         }
+
+//         reportHtml += '<p style="margin:16px 0 0 0">Log record: <a href="' + logUrl + '">' + reassignmentLog.Name + '</a></p>';
+//         reportHtml += '</div>';
+//         return reportHtml;
+//     }
+
+//     /**
+//      * Builds one label / value row of the report summary table.
+//      * @param label row label
+//      * @param value row value; blank values are shown as "-"
+//      * @return the row as HTML
+//      */
+//     private static String buildReportRow(String label, String value) {
+//         return '<tr><td style="border:1px solid #cccccc;font-weight:bold">' + label + '</td><td style="border:1px solid #cccccc">' + formatReportValue(value) + '</td></tr>';
+//     }
+
+//     /**
+//      * Makes a value safe to show in the report.
+//      * @param value value to show
+//      * @return the value escaped for HTML, or "-" when blank
+//      */
+//     private static String formatReportValue(String value) {
+//         return String.isBlank(value) ? '-' : value.escapeHtml4();
+//     }
+
+//     /**
+//      * Joins a list of values for the report.
+//      * @param values values to join
+//      * @return the values separated by commas, or blank when there are none
+//      */
+//     private static String joinReportValues(List<String> values) {
+//         return (values == null || values.isEmpty()) ? '' : String.join(values, ', ');
+//     }
+
+//     /**
+//      * Reads and saves the reassignment log without sharing, so the log can always be saved and
+//      * the read-back sees every reassigned lead, even leads now owned by users outside the
+//      * Team Leader's own view.
+//      */
+//     private without sharing class ReassignmentLogWriter {
+
+//         /**
+//          * Returns the log record, or null when it no longer exists.
+//          * @param logId Id of the log record
+//          * @return the log record with its name, created date, saved run details and any earlier error message
+//          */
+//         public Apex_Log__c getLog(Id logId) {
+//             List<Apex_Log__c> reassignmentLogs = [SELECT Id, Name, CreatedDate, Request__c, Error_Message__c FROM Apex_Log__c WHERE Id = :logId LIMIT 1];
+//             return reassignmentLogs.isEmpty() ? null : reassignmentLogs[0];
+//         }
+
+//         /**
+//          * Returns the leads from this run that the current user reassigned after the log was created.
+//          * @param sentLeadIds    leads sent for reassignment in this run
+//          * @param runStartedAt   when the run's log was created
+//          * @param reassignedById the Team Leader who ran the reassignment
+//          * @return the reassigned leads with their current owner and previous owner
+//          */
+//         public List<Lead> getReassignedLeads(Set<Id> sentLeadIds, DateTime runStartedAt, Id reassignedById) {
+//             if (sentLeadIds == null || sentLeadIds.isEmpty()) return new List<Lead>();
+//             return [SELECT Id, OwnerId, Owner.Name, Previous_Presales_user__c FROM Lead WHERE Id IN :sentLeadIds AND Last_Reassigned_Date__c >= :runStartedAt AND Last_Reassigner_Name__c = :reassignedById];
+//         }
+
+//         /**
+//          * Inserts a new log record or updates an existing one.
+//          * @param reassignmentLog log record to save
+//          */
+//         public void saveLog(Apex_Log__c reassignmentLog) {
+//             upsert reassignmentLog;
+//         }
+//     }
+
+//     /**
+//      * One page of leads for the screen, with the total number of matching leads.
+//      */
 //     public class LeadResult {
 //         @AuraEnabled public List<Lead> leads      { get; set; }
-//         @AuraEnabled public Integer    totalCount  { get; set; }
+//         @AuraEnabled public Integer    totalCount { get; set; }
 
+//         /**
+//          * @param leads      leads on the page
+//          * @param totalCount total number of matching leads
+//          */
 //         public LeadResult(List<Lead> leads, Integer totalCount) {
 //             this.leads      = leads;
 //             this.totalCount = totalCount;
 //         }
 //     }
 
-//     /* ===== Added By Sathya - START : Option wrapper for filter dropdowns ===== */
-//     public class OptionWrapper {
-//         @AuraEnabled public String value { get; set; }
-//         @AuraEnabled public String label { get; set; }
-
-//         public OptionWrapper(String value, String label) {
-//             this.value = value;
-//             this.label = label;
-//         }
+//     /**
+//      * Run details saved in Apex_Log__c.Request__c.
+//      */
+//     public class ReassignRequestWrapper {
+//         public String       reassignedBy;
+//         public String       reassignedById;
+//         public String       startedAt;
+//         public List<String> fromUsers;
+//         public List<String> toUsers;
+//         public ReassignFilterWrapper filters;
+//         public Integer      leadsSelected;
+//         public Integer      leadsToReassign;
+//         public Integer      batchSize;
 //     }
-//     /* ===== Added By Sathya - END : Option wrapper for filter dropdowns ===== */
-    
+
+//     /**
+//      * Filters the Team Leader used on the screen for the run.
+//      */
+//     public class ReassignFilterWrapper {
+//         public String       leadStatus;
+//         public List<String> dropOffReasons;
+//         public List<String> allocatedProjects;
+//         public String       searchKey;
+//         public String       recoveryFromDate;
+//         public String       recoveryToDate;
+//     }
+
+//     /**
+//      * Run result saved in Apex_Log__c.Response__c, including where the report email went.
+//      */
+//     public class ReassignResponseWrapper {
+//         public String               completedAt;
+//         public Integer              leadsSent;
+//         public Integer              leadsReassigned;
+//         public Integer              leadsFailed;
+//         public Integer              leadsKeptSameOwner;
+//         public Map<String, Integer> splitByOwner;
+//         public List<String>         reportEmailedTo;
+//         public String               reportEmailError;
+//     }
 // }
-
-// ============================================================================================
-// ========================================= Added by Sivam V ============================================
-// public with sharing class LeadReassignController {   
-
-//     /* =========================================================
-//        GET USERS (SUBORDINATES + CURRENT USER)
-//        ========================================================= */
-//     @AuraEnabled(cacheable=true)
-//     public static List<User> getUsers() {
-//         User me = [
-//             SELECT UserRoleId
-//             FROM User
-//             WHERE Id = :UserInfo.getUserId()
-//             LIMIT 1
-//         ];
-
-//         Set<Id> roleIds = getSubordinateRoleIds(me.UserRoleId);
-//         roleIds.remove(me.UserRoleId);
-
-//         return [
-//             SELECT Id, Name
-//             FROM User
-//             WHERE IsActive = true
-//             AND (UserRoleId IN :roleIds OR Id = :UserInfo.getUserId())
-//             ORDER BY Name
-//         ];
-//     }
-
-//     /* =========================================================
-//        ROLE HIERARCHY HELPERS
-//        ========================================================= */
-//     private static Set<Id> getSubordinateRoleIds(Id rootRoleId) {
-//         Map<Id, UserRole> roleMap = new Map<Id, UserRole>([
-//             SELECT Id, ParentRoleId
-//             FROM UserRole
-//         ]);
-
-//         Set<Id> result = new Set<Id>();
-//         collectRoles(rootRoleId, roleMap, result);
-//         return result;
-//     }
-
-//     private static void collectRoles(
-//         Id parentId,
-//         Map<Id, UserRole> roleMap,
-//         Set<Id> result
-//     ) {
-//         for (UserRole r : roleMap.values()) {
-//             if (r.ParentRoleId == parentId && !result.contains(r.Id)) {
-//                 result.add(r.Id);
-//                 collectRoles(r.Id, roleMap, result);
-//             }
-//         }
-//     }
-
-//     /* =========================================================
-//        LEAD STATUS PICKLIST
-//        ========================================================= */
-//     @AuraEnabled(cacheable=true)
-//     public static List<String> getLeadStatusPicklistValues() {
-//         List<String> values = new List<String>();
-//         for (Schema.PicklistEntry p :
-//             Lead.Lead_Status__c.getDescribe().getPicklistValues()) {
-//             if (p.isActive()) {
-//                 values.add(p.getValue());
-//             }
-//         }
-//         return values;
-//     }
-
-//     @AuraEnabled(cacheable=true)
-//     public static List<String> getDropOffReasonsPicklistValues() {
-//         List<String> values = new List<String>();
-//         for (Schema.PicklistEntry p :
-//             Lead.Drop_off_Reasons__c.getDescribe().getPicklistValues()) {
-//             if (p.isActive()) {
-//                 values.add(p.getValue());
-//             }
-//         }
-//         return values;
-//     }
-
-//     /* =========================================================
-//        GET DISTINCT ALLOCATED PROJECTS (for current owner + status)
-//        ========================================================= */
-//     /* ===== Sathya - START : Get distinct allocated projects ===== */
-//     @AuraEnabled
-//     public static List<String> getAllocatedProjects(
-//         List<Id> ownerIds,
-//         String status
-//     ) {
-//         if (ownerIds == null || ownerIds.isEmpty()) {
-//             return new List<String>();
-//         }
-
-//         Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-//         Date limitDate = Date.today().addDays(-recoveryDays);
-
-//         String q =
-//             'SELECT Allocated_Project__c ' +
-//             'FROM Lead ' +
-//             'WHERE OwnerId IN :ownerIds ' +
-//             'AND Allocated_Project__c != null';
-
-//         if (String.isNotBlank(status) && status != 'ALL') {
-//             q += ' AND Lead_Status__c = :status';
-//         }
-//         if (status == 'Recovery - Pre Sales') {
-//             q += ' AND Unqualified_Date__c <= :limitDate';
-//         } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//             q += ' AND Closed_Lost_Date__c <= :limitDate';
-//         }
-
-//         q += ' GROUP BY Allocated_Project__c ORDER BY Allocated_Project__c';
-
-//         Set<String> projects = new Set<String>();
-//         for (AggregateResult ar : Database.query(q)) {
-//             String val = (String) ar.get('Allocated_Project__c');
-//             if (String.isNotBlank(val)) projects.add(val);
-//         }
-//         return new List<String>(projects);
-//     }
-//     /* ===== Sathya - END : Get distinct allocated projects ===== */
-
-//     /* ===== Added By Sathya - START : Campaign / Sub Campaign filter options ===== */
-//     @AuraEnabled
-//     public static List<OptionWrapper> getCampaignOptions(List<Id> ownerIds) {
-//         List<OptionWrapper> options = new List<OptionWrapper>();
-//         if (ownerIds == null || ownerIds.isEmpty()) {
-//             return options;
-//         }
-//         for (AggregateResult aggregateRow : [SELECT Campaign_std__c campaignId, Campaign_std__r.Name campaignName FROM Lead WHERE OwnerId IN :ownerIds AND Campaign_std__c != null GROUP BY Campaign_std__c, Campaign_std__r.Name ORDER BY Campaign_std__r.Name]) {
-//             options.add(new OptionWrapper((Id) aggregateRow.get('campaignId'), (String) aggregateRow.get('campaignName')));
-//         }
-//         return options;
-//     }
-
-//     @AuraEnabled
-//     public static List<OptionWrapper> getSubCampaignOptions(List<Id> ownerIds, Id campaignId) {
-//         List<OptionWrapper> options = new List<OptionWrapper>();
-//         if (ownerIds == null || ownerIds.isEmpty()) {
-//             return options;
-//         }
-//         String q = 'SELECT Sub_Campaign__c subCampaignId, Sub_Campaign__r.Name subCampaignName FROM Lead WHERE OwnerId IN :ownerIds AND Sub_Campaign__c != null';
-//         if (campaignId != null) {
-//             q += ' AND Campaign_std__c = :campaignId';
-//         }
-//         q += ' GROUP BY Sub_Campaign__c, Sub_Campaign__r.Name ORDER BY Sub_Campaign__r.Name';
-//         for (AggregateResult aggregateRow : Database.query(q)) {
-//             options.add(new OptionWrapper((Id) aggregateRow.get('subCampaignId'), (String) aggregateRow.get('subCampaignName')));
-//         }
-//         return options;
-//     }
-
-//     /*
-//        Activity filter clause builder.
-//        activityFilter values: 'NFA', 'Untouched', 'Missed Call' (anything else = no extra filter).
-//        Binds used (:nowDateTime, :startOfToday) must be declared in the calling method.
-//     */
-//     private static String buildActivityFilterClause(String activityFilter) {
-//         if (activityFilter == 'NFA') {
-//             return ' AND (Next_Followup_Date__c = null OR Next_Followup_Date__c < :nowDateTime)' +
-//                    ' AND (Next_Scheduled_Date__c = null OR Next_Scheduled_Date__c < :nowDateTime)';
-//         }
-//         if (activityFilter == 'Untouched') {
-//             return ' AND RecordType.Name = \'Pre Sales\'' +
-//                    ' AND Lead_Status__c IN (\'New Enquiry\', \'Unable to connect\', \'Follow Up\')' +
-//                    ' AND Followup_Scheduled__c = false' +
-//                    ' AND (pre_sales_last_attempt__c = null OR pre_sales_last_attempt__c < :startOfToday)';
-//         }
-//         if (activityFilter == 'Missed Call') {
-//             return ' AND Id IN (SELECT Lead__c FROM Call_Detail__c WHERE Call_Type__c = \'Inbound Call\' AND Status__c IN (\'BUSY\', \'CANCEL\', \'NOANSWER\') AND Is_Called_Back__c = false)';
-//         }
-//         return '';
-//     }
-//     /* ===== Added By Sathya - END : Campaign / Sub Campaign filter options ===== */
-
-//     /* =========================================================
-//        GET LEADS BY OWNER + STATUS + PROJECT (with pagination)
-//        ========================================================= */
-//     @AuraEnabled
-//     public static LeadResult getLeadsByOwner(
-//         List<Id> ownerIds,
-//         Date fromDate,
-//         Date toDate,
-//         String status,
-//         List<String> dropStatus,
-//         List<String> projects,
-//         String searchKey,
-//         Integer pageSize,
-//         Integer pageNumber,
-//         Id campaignId,
-//         Id subCampaignId,
-//         String activityFilter
-//     ) {
-//         try {
-//             if (ownerIds == null || ownerIds.isEmpty()) {
-//                 return new LeadResult(new List<Lead>(), 0);
-//             }
-
-//             Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-//             Date limitDate = Date.today().addDays(-recoveryDays);
-
-//             if (pageSize == null || pageSize <= 0)    pageSize   = 50;
-//             if (pageNumber == null || pageNumber < 1) pageNumber = 1;
-
-//             Integer offset = (pageNumber - 1) * pageSize;
-
-//             Boolean hasDropFilter    = dropStatus != null && !dropStatus.isEmpty();
-//             Boolean hasProjectFilter = projects != null && !projects.isEmpty();
-
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filter binds ===== */
-//             DateTime nowDateTime  = System.now();
-//             DateTime startOfToday = DateTime.newInstance(Date.today(), Time.newInstance(0, 0, 0, 0));
-//             String activityClause = buildActivityFilterClause(activityFilter);
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filter binds ===== */
-
-//             // --- Data query ---
-//             String query =
-//                 'SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId, ' +
-//                 'Allocated_Project__c, Campaign_std__r.Name, Sub_Campaign__r.Name, ' +
-//                 'Drop_off_Reasons__c, FORMAT(Unqualified_Date__c), FORMAT(Closed_Lost_Date__c) ' +
-//                 'FROM Lead WHERE OwnerId IN :ownerIds';
-
-//             if (hasDropFilter)                                    query += ' AND Drop_off_Reasons__c IN :dropStatus';
-//             if (hasProjectFilter)                                 query += ' AND Allocated_Project__c IN :projects';
-//             if (String.isNotBlank(status) && status != 'ALL')    query += ' AND Lead_Status__c = :status';
-//             if (String.isNotBlank(searchKey)) {
-//                 String searchPattern = '%' + searchKey + '%';
-//                 query += ' AND Lead_ID__c LIKE :searchPattern';
-//             }
-
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filters (data query) ===== */
-//             if (campaignId != null)    query += ' AND Campaign_std__c = :campaignId';
-//             if (subCampaignId != null) query += ' AND Sub_Campaign__c = :subCampaignId';
-//             query += activityClause;
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filters (data query) ===== */
-
-//             if (status == 'Recovery - Pre Sales') {
-//                 query += ' AND Unqualified_Date__c <= :limitDate';
-//                 if (fromDate != null) query += ' AND Unqualified_Date__c >= :fromDate';
-//                 if (toDate   != null) query += ' AND Unqualified_Date__c <= :toDate';
-//                 query += ' ORDER BY Unqualified_Date__c DESC';
-
-//             } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//                 if(fromDate == null && toDate == null){
-//                     query += ' AND Closed_Lost_Date__c <= :limitDate'; 
-//                 }
-//                 if (fromDate != null) query += ' AND Closed_Lost_Date__c >= :fromDate';
-//                 if (toDate   != null) query += ' AND Closed_Lost_Date__c <= :toDate';
-//                 query += ' ORDER BY Closed_Lost_Date__c DESC';
-
-//             } else {
-//                 query += ' ORDER BY CreatedDate DESC';
-//             }
-
-//             query += ' LIMIT :pageSize OFFSET :offset';
-
-//             // --- Count query ---
-//             String countQuery =
-//                 'SELECT COUNT() FROM Lead WHERE OwnerId IN :ownerIds';
-
-//             if (hasDropFilter)                                    countQuery += ' AND Drop_off_Reasons__c IN :dropStatus';
-//             if (hasProjectFilter)                                 countQuery += ' AND Allocated_Project__c IN :projects';
-//             if (String.isNotBlank(status) && status != 'ALL')    countQuery += ' AND Lead_Status__c = :status';
-//             if (String.isNotBlank(searchKey)) {
-//                 String searchPattern = '%' + searchKey + '%';
-//                 countQuery += ' AND Lead_ID__c LIKE :searchPattern';
-//             }
-
-//             /* ===== Added By Sathya - START : Campaign / Sub Campaign / Activity filters (count query) ===== */
-//             if (campaignId != null)    countQuery += ' AND Campaign_std__c = :campaignId';
-//             if (subCampaignId != null) countQuery += ' AND Sub_Campaign__c = :subCampaignId';
-//             countQuery += activityClause;
-//             /* ===== Added By Sathya - END : Campaign / Sub Campaign / Activity filters (count query) ===== */
-
-//             if (status == 'Recovery - Pre Sales') {
-//                 countQuery += ' AND Unqualified_Date__c <= :limitDate';
-//                 if (fromDate != null) countQuery += ' AND Unqualified_Date__c >= :fromDate';
-//                 if (toDate   != null) countQuery += ' AND Unqualified_Date__c <= :toDate';
-
-//             } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-//                 countQuery += ' AND Closed_Lost_Date__c <= :limitDate';
-//                 if (fromDate != null) countQuery += ' AND Closed_Lost_Date__c >= :fromDate';
-//                 if (toDate   != null) countQuery += ' AND Closed_Lost_Date__c <= :toDate';
-//             }
-
-//             List<Lead> leads    = Database.query(query);
-//             Integer totalCount  = Database.countQuery(countQuery);
-
-//             return new LeadResult(leads, totalCount);
-
-//         } catch (Exception ex) {
-//             System.debug('getLeadsByOwner error: ' + ex.getMessage() + ' | ' + ex.getStackTraceString());
-//             return new LeadResult(new List<Lead>(), 0);
-//         }
-//     }
-
-//     /* =========================================================
-//        SEARCH LEADS BY LEAD ID
-//        ========================================================= */
-//     @AuraEnabled
-//     public static List<Lead> searchLeadsByLeadId(
-//         List<Id> ownerIds,
-//         String searchKey,
-//         Integer limitCount
-//     ) {
-//         if (ownerIds == null || ownerIds.isEmpty() || String.isBlank(searchKey)) {
-//             return new List<Lead>();
-//         }
-
-//         if (limitCount == null || limitCount <= 0) limitCount = 100;
-
-//         String searchPattern = '%' + searchKey + '%';
-
-//         return [
-//             SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId
-//             FROM Lead
-//             WHERE OwnerId IN :ownerIds
-//             AND Lead_ID__c LIKE :searchPattern
-//             ORDER BY CreatedDate DESC
-//             LIMIT :limitCount
-//         ];
-//     }
-
-//     /* =========================================================
-//        REASSIGN LEADS
-//        ========================================================= */
-//     /* ===== Sathya - START : */
-//     @AuraEnabled
-//     public static void reassignLeads(
-//         List<Id> leadIds,
-//         List<Id> newOwnerIds
-//     ) {
-//         if (leadIds == null || leadIds.isEmpty()) return;
-//         if (newOwnerIds == null || newOwnerIds.isEmpty()) return;
-
-//         Id RECOVERY_RT_ID     = '012IS000000c3OBYAY';
-//         Id PRESALES_RT_ID     = '012IS000000c1dOYAQ';
-//         Id RECOVERY_SVC_RT_ID = '012IS000000c3OBYAY';
-//         Id SVC_RT_ID          = '012fu000001AprtAAC';
-
-//         Set<Id> uniqueLeadIds = new Set<Id>(leadIds);
-
-//         List<Lead> leads = [
-//             SELECT Id,
-//                    OwnerId,
-//                    RecordTypeId,
-//                    Lead_Status__c,
-//                    Is_Unqualified__c,
-//                    Unqualified_Date__c,
-//                    Unqualified_Lost_By__c,
-//                    Unqualified_Reason__c,
-//                    Recovery_Reassigned_Date__c,
-//                    Recovery_User__c,
-//                    Lead_ID__c,
-//                    Lead_ReAssigned_Date__c,
-//                    Previous_Presales_user__c,
-//                    Reassigned_By__c,
-//                    Lead_ReAssigned_Dates__c,
-//                    Owner.Name
-//             FROM Lead
-//             WHERE Id IN :uniqueLeadIds
-//         ];
-
-//         Map<Id, User> userMap = new Map<Id, User>(
-//             [SELECT Id, Profile.Name
-//              FROM User
-//              WHERE Id IN :newOwnerIds]
-//         );
-
-//         Integer index  = 0;
-//         Integer size   = newOwnerIds.size();
-//         List<Lead> updates = new List<Lead>();
-
-//         for (Lead ld : leads) {
-
-//             Id     oldOwnerId = ld.OwnerId;
-//             String ownerName  = ld.Owner.Name;
-
-//             ld.OwnerId                   = newOwnerIds[index];
-//             ld.Lead_ReAssigned_Dates__c  = System.now();
-//             ld.Previous_Presales_user__c = oldOwnerId;
-//             ld.Reassigned_By__c          = UserInfo.getUserId();
-
-//             /* ===== Added By Sathya - START : Last reassigned date + last reassigner (screen reassign only) ===== */
-//             ld.Last_Reassigned_Date__c   = System.now();
-//             ld.Last_Reassigner_Name__c   = UserInfo.getUserId();
-//             /* ===== Added By Sathya - END : Last reassigned date + last reassigner ===== */
-
-//             User   targetUser  = userMap.get(newOwnerIds[index]);
-//             String profileName = (targetUser != null) ? targetUser.Profile.Name : '';
-
-//             if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Recovery') {
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Lead_ReAssigned_Date__c     = Date.today();
-//                 ld.Previous_Lead_owner__c      = ownerName;
-//                 ld.Is_Lead_ReAssigned__c       = true;
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-//             else if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Pre Sales') {
-//                 ld.RecordTypeId                = PRESALES_RT_ID;
-//                 ld.Lead_Status__c              = 'Unable to connect';
-//                 ld.Previous_Lead_owner__c      = ownerName;
-//                 ld.Lead_ReAssigned_Date__c     = Date.today();
-//                 ld.Is_Lead_ReAssigned__c       = true;
-//                 ld.Is_Unqualified__c           = false;
-//                 ld.Unqualified_Date__c         = null;
-//                 ld.Unqualified_Lost_By__c      = null;
-//                 ld.Unqualified_Reason__c       = null;
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-//             else if (ld.RecordTypeId == RECOVERY_SVC_RT_ID && profileName == 'SVC Team') {
-//                 ld.RecordTypeId                = SVC_RT_ID;
-//                 ld.Lead_Status__c              = 'Allocate to SVC';
-//                 ld.Is_Unqualified__c           = false;
-//                 ld.Unqualified_Date__c         = null;
-//                 ld.Unqualified_Lost_By__c      = null;
-//                 ld.Unqualified_Reason__c       = null;
-//                 ld.Recovery_Reassigned_Date__c = Date.today();
-//                 ld.Pushed_On__c                = System.now();
-//                 ld.Pushed_By__c                = UserInfo.getUserId();
-//             }
-
-//             updates.add(ld);
-//             index++;
-//             if (index == size) index = 0;
-//         }
-
-//         if (!updates.isEmpty()) {
-//             Database.update(updates, false);
-//         }
-//            integer i=1;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//         i=i++;
-//     }
-//     /* ===== Sathya - END : */
-
-//     /* =========================================================
-//        WRAPPER CLASS
-//        ========================================================= */
-//     public class LeadResult {
-//         @AuraEnabled public List<Lead> leads      { get; set; }
-//         @AuraEnabled public Integer    totalCount  { get; set; }
-
-//         public LeadResult(List<Lead> leads, Integer totalCount) {
-//             this.leads      = leads;
-//             this.totalCount = totalCount;
-//         }
-//     }
-
-//     /* ===== Added By Sathya - START : Option wrapper for filter dropdowns ===== */
-//     public class OptionWrapper {
-//         @AuraEnabled public String value { get; set; }
-//         @AuraEnabled public String label { get; set; }
-
-//         public OptionWrapper(String value, String label) {
-//             this.value = value;
-//             this.label = label;
-//         }
-//     }
-//     /* ===== Added By Sathya - END : Option wrapper for filter dropdowns ===== */
-    
-// }
-
-// ============================================================================================
-// ========================================= Added by Sivam V ============================================
-
-public with sharing class LeadReassignController {   
-
-    /* =========================================================
-       GET USERS (SUBORDINATES + CURRENT USER)
-       ========================================================= */
-    @AuraEnabled(cacheable=true)
-    public static List<User> getUsers() {
-        User me = [
-            SELECT UserRoleId
-            FROM User
-            WHERE Id = :UserInfo.getUserId()
-            LIMIT 1
-        ];
-
-        Set<Id> roleIds = getSubordinateRoleIds(me.UserRoleId);
-        roleIds.remove(me.UserRoleId);
-
-        return [
-            SELECT Id, Name
-            FROM User
-            WHERE IsActive = true
-            AND (UserRoleId IN :roleIds OR Id = :UserInfo.getUserId())
-            ORDER BY Name
-        ];
-    }
-
-    /* =========================================================
-       ROLE HIERARCHY HELPERS
-       ========================================================= */
-    private static Set<Id> getSubordinateRoleIds(Id rootRoleId) {
-        Map<Id, UserRole> roleMap = new Map<Id, UserRole>([
-            SELECT Id, ParentRoleId
-            FROM UserRole
-        ]);
-
-        Set<Id> result = new Set<Id>();
-        collectRoles(rootRoleId, roleMap, result);
-        return result;
-    }
-
-    private static void collectRoles(
-        Id parentId,
-        Map<Id, UserRole> roleMap,
-        Set<Id> result
-    ) {
-        for (UserRole r : roleMap.values()) {
-            if (r.ParentRoleId == parentId && !result.contains(r.Id)) {
-                result.add(r.Id);
-                collectRoles(r.Id, roleMap, result);
-            }
-        }
-    }
-
-    /* =========================================================
-       LEAD STATUS PICKLIST
-       ========================================================= */
-    @AuraEnabled(cacheable=true)
-    public static List<String> getLeadStatusPicklistValues() {
-        List<String> values = new List<String>();
-        for (Schema.PicklistEntry p :
-            Lead.Lead_Status__c.getDescribe().getPicklistValues()) {
-            if (p.isActive()) {
-                values.add(p.getValue());
-            }
-        }
-        return values;
-    }
-
-    @AuraEnabled(cacheable=true)
-    public static List<String> getDropOffReasonsPicklistValues() {
-        List<String> values = new List<String>();
-        for (Schema.PicklistEntry p :
-            Lead.Drop_off_Reasons__c.getDescribe().getPicklistValues()) {
-            if (p.isActive()) {
-                values.add(p.getValue());
-            }
-        }
-        return values;
-    }
-
-    /* =========================================================
-       GET DISTINCT ALLOCATED PROJECTS (for current owner + status)
-       ========================================================= */
-    /* ===== Sathya - START : Get distinct allocated projects ===== */
-    @AuraEnabled
-    public static List<String> getAllocatedProjects(
-        List<Id> ownerIds,
-        String status
-    ) {
-        if (ownerIds == null || ownerIds.isEmpty()) {
-            return new List<String>();
-        }
-
-        Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-        Date limitDate = Date.today().addDays(-recoveryDays);
-
-        String q =
-            'SELECT Allocated_Project__c ' +
-            'FROM Lead ' +
-            'WHERE OwnerId IN :ownerIds ' +
-            'AND Allocated_Project__c != null';
-
-        if (String.isNotBlank(status) && status != 'ALL') {
-            q += ' AND Lead_Status__c = :status';
-        }
-        if (status == 'Recovery - Pre Sales') {
-            q += ' AND Unqualified_Date__c <= :limitDate';
-        } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-            q += ' AND Closed_Lost_Date__c <= :limitDate';
-        }
-
-        q += ' GROUP BY Allocated_Project__c ORDER BY Allocated_Project__c';
-
-        Set<String> projects = new Set<String>();
-        for (AggregateResult ar : Database.query(q)) {
-            String val = (String) ar.get('Allocated_Project__c');
-            if (String.isNotBlank(val)) projects.add(val);
-        }
-        return new List<String>(projects);
-    }
-    /* ===== Sathya - END : Get distinct allocated projects ===== */
-
-    /* =========================================================
-       GET LEADS BY OWNER + STATUS + PROJECT (with pagination)
-       ========================================================= */
-    @AuraEnabled
-    public static LeadResult getLeadsByOwner(
-        List<Id> ownerIds,
-        Date fromDate,
-        Date toDate,
-        String status,
-        List<String> dropStatus,
-        List<String> projects,
-        String searchKey,
-        Integer pageSize,
-        Integer pageNumber
-    ) {
-        try {
-            if (ownerIds == null || ownerIds.isEmpty()) {
-                return new LeadResult(new List<Lead>(), 0);
-            }
-
-            Integer recoveryDays = Integer.valueOf(Label.Recovery_Reassign_Days);
-            Date limitDate = Date.today().addDays(-recoveryDays);
-
-            if (pageSize == null || pageSize <= 0)    pageSize   = 50;
-            if (pageNumber == null || pageNumber < 1) pageNumber = 1;
-
-            Integer offset = (pageNumber - 1) * pageSize;
-
-            Boolean hasDropFilter    = dropStatus != null && !dropStatus.isEmpty();
-            Boolean hasProjectFilter = projects != null && !projects.isEmpty();
-
-            // --- Data query ---
-            String query =
-                'SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId, ' +
-                'Allocated_Project__c, ' +
-                'Drop_off_Reasons__c, FORMAT(Unqualified_Date__c), FORMAT(Closed_Lost_Date__c) ' +
-                'FROM Lead WHERE OwnerId IN :ownerIds';
-
-            if (hasDropFilter)                                    query += ' AND Drop_off_Reasons__c IN :dropStatus';
-            if (hasProjectFilter)                                 query += ' AND Allocated_Project__c IN :projects';
-            if (String.isNotBlank(status) && status != 'ALL')    query += ' AND Lead_Status__c = :status';
-            if (String.isNotBlank(searchKey)) {
-                String searchPattern = '%' + searchKey + '%';
-                query += ' AND Lead_ID__c LIKE :searchPattern';
-            }
-
-            if (status == 'Recovery - Pre Sales') {
-                query += ' AND Unqualified_Date__c <= :limitDate';
-                if (fromDate != null) query += ' AND Unqualified_Date__c >= :fromDate';
-                if (toDate   != null) query += ' AND Unqualified_Date__c <= :toDate';
-                query += ' ORDER BY Unqualified_Date__c DESC';
-
-            } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-                if(fromDate == null && toDate == null){
-                    query += ' AND Closed_Lost_Date__c <= :limitDate'; 
-                }
-                if (fromDate != null) query += ' AND Closed_Lost_Date__c >= :fromDate';
-                if (toDate   != null) query += ' AND Closed_Lost_Date__c <= :toDate';
-                query += ' ORDER BY Closed_Lost_Date__c DESC';
-
-            } else {
-                query += ' ORDER BY CreatedDate DESC';
-            }
-
-            query += ' LIMIT :pageSize OFFSET :offset';
-
-            // --- Count query ---
-            String countQuery =
-                'SELECT COUNT() FROM Lead WHERE OwnerId IN :ownerIds';
-
-            if (hasDropFilter)                                    countQuery += ' AND Drop_off_Reasons__c IN :dropStatus';
-            if (hasProjectFilter)                                 countQuery += ' AND Allocated_Project__c IN :projects';
-            if (String.isNotBlank(status) && status != 'ALL')    countQuery += ' AND Lead_Status__c = :status';
-            if (String.isNotBlank(searchKey)) {
-                String searchPattern = '%' + searchKey + '%';
-                countQuery += ' AND Lead_ID__c LIKE :searchPattern';
-            }
-
-            if (status == 'Recovery - Pre Sales') {
-                countQuery += ' AND Unqualified_Date__c <= :limitDate';
-                if (fromDate != null) countQuery += ' AND Unqualified_Date__c >= :fromDate';
-                if (toDate   != null) countQuery += ' AND Unqualified_Date__c <= :toDate';
-
-            } else if (status == 'Recovery - Sales' || status == 'Recovery - SVC') {
-                countQuery += ' AND Closed_Lost_Date__c <= :limitDate';
-                if (fromDate != null) countQuery += ' AND Closed_Lost_Date__c >= :fromDate';
-                if (toDate   != null) countQuery += ' AND Closed_Lost_Date__c <= :toDate';
-            }
-
-            List<Lead> leads    = Database.query(query);
-            Integer totalCount  = Database.countQuery(countQuery);
-
-            return new LeadResult(leads, totalCount);
-
-        } catch (Exception ex) {
-            System.debug('getLeadsByOwner error: ' + ex.getMessage() + ' | ' + ex.getStackTraceString());
-            return new LeadResult(new List<Lead>(), 0);
-        }
-    }
-
-    /* =========================================================
-       SEARCH LEADS BY LEAD ID
-       ========================================================= */
-    @AuraEnabled
-    public static List<Lead> searchLeadsByLeadId(
-        List<Id> ownerIds,
-        String searchKey,
-        Integer limitCount
-    ) {
-        if (ownerIds == null || ownerIds.isEmpty() || String.isBlank(searchKey)) {
-            return new List<Lead>();
-        }
-
-        if (limitCount == null || limitCount <= 0) limitCount = 100;
-
-        String searchPattern = '%' + searchKey + '%';
-
-        return [
-            SELECT Id, Name, Lead_ID__c, Lead_Status__c, RecordTypeId, OwnerId
-            FROM Lead
-            WHERE OwnerId IN :ownerIds
-            AND Lead_ID__c LIKE :searchPattern
-            ORDER BY CreatedDate DESC
-            LIMIT :limitCount
-        ];
-    }
-
-    /* =========================================================
-       REASSIGN LEADS
-       ========================================================= */
-    /* ===== Sathya - START : */
-    @AuraEnabled
-    public static void reassignLeads(
-        List<Id> leadIds,
-        List<Id> newOwnerIds
-    ) {
-        if (leadIds == null || leadIds.isEmpty()) return;
-        if (newOwnerIds == null || newOwnerIds.isEmpty()) return;
-
-        /* ===== Added By Sathya - START : Round robin decided on the lead order received, then shared reassignment logic ===== */
-        Map<Id, Id> ownerIdByLeadId = new Map<Id, Id>();
-        Integer ownerPosition = 0;
-        for (Id leadId : leadIds) {
-            if (ownerIdByLeadId.containsKey(leadId)) continue;
-            ownerIdByLeadId.put(leadId, newOwnerIds[ownerPosition]);
-            ownerPosition = Math.mod(ownerPosition + 1, newOwnerIds.size());
-        }
-        applyReassignment(ownerIdByLeadId);
-        /* ===== Added By Sathya - END : Round robin decided on the lead order received, then shared reassignment logic ===== */
-           integer i=1;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-        i=i++;
-    }
-    /* ===== Sathya - END : */
-
-    /* ===== Added By Sathya - START : Fair split across all selected users + failed lead reporting =====
-       The screen decides the owner of every selected lead before sending batches of 5,
-       so the split stays even for any number of users (6, 7, 10...). Leads that fail to
-       save are returned with their reason instead of being silently skipped. */
-    @AuraEnabled
-    public static List<String> reassignLeadsWithOwnerMap(Map<String, String> leadOwnerMap) {
-        if (leadOwnerMap == null || leadOwnerMap.isEmpty()) return new List<String>();
-
-        Map<Id, Id> ownerIdByLeadId = new Map<Id, Id>();
-        for (String leadId : leadOwnerMap.keySet()) {
-            String ownerId = leadOwnerMap.get(leadId);
-            if (String.isNotBlank(leadId) && String.isNotBlank(ownerId)) {
-                ownerIdByLeadId.put(Id.valueOf(leadId), Id.valueOf(ownerId));
-            }
-        }
-        return applyReassignment(ownerIdByLeadId);
-    }
-
-    private static List<String> applyReassignment(Map<Id, Id> ownerIdByLeadId) {
-        List<String> failureMessages = new List<String>();
-        if (ownerIdByLeadId == null || ownerIdByLeadId.isEmpty()) return failureMessages;
-
-        Id RECOVERY_RT_ID     = '012IS000000c3OBYAY';
-        Id PRESALES_RT_ID     = '012IS000000c1dOYAQ';
-        Id RECOVERY_SVC_RT_ID = '012IS000000c3OBYAY';
-        Id SVC_RT_ID          = '012fu000001AprtAAC';
-
-        Set<Id> leadIdSet = ownerIdByLeadId.keySet();
-        Set<Id> targetOwnerIds = new Set<Id>(ownerIdByLeadId.values());
-
-        List<Lead> leads = [SELECT Id, OwnerId, RecordTypeId, Lead_Status__c, Is_Unqualified__c, Unqualified_Date__c, Unqualified_Lost_By__c, Unqualified_Reason__c, Recovery_Reassigned_Date__c, Recovery_User__c, Lead_ID__c, Lead_ReAssigned_Date__c, Previous_Presales_user__c, Reassigned_By__c, Lead_ReAssigned_Dates__c, Owner.Name FROM Lead WHERE Id IN :leadIdSet];
-
-        Map<Id, User> userMap = new Map<Id, User>([SELECT Id, Profile.Name FROM User WHERE Id IN :targetOwnerIds]);
-
-        List<Lead> updates = new List<Lead>();
-
-        for (Lead ld : leads) {
-
-            Id     oldOwnerId = ld.OwnerId;
-            String ownerName  = ld.Owner.Name;
-            Id     newOwnerId = ownerIdByLeadId.get(ld.Id);
-
-            ld.OwnerId                   = newOwnerId;
-            ld.Lead_ReAssigned_Dates__c  = System.now();
-            ld.Previous_Presales_user__c = oldOwnerId;
-            ld.Reassigned_By__c          = UserInfo.getUserId();
-
-            /* ===== Added By Sivam V - START : Last reassigned date + last reassigner (screen reassign only) ===== */
-            ld.Last_Reassigned_Date__c   = System.now();
-            ld.Last_Reassigner_Name__c   = UserInfo.getUserId();
-            /* ===== Added by Sivam V - END : Last reassigned date + last reassigner ===== */
-
-            User   targetUser  = userMap.get(newOwnerId);
-            String profileName = (targetUser != null) ? targetUser.Profile.Name : '';
-
-            if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Recovery') {
-                ld.Recovery_Reassigned_Date__c = Date.today();
-                ld.Lead_ReAssigned_Date__c     = Date.today();
-                ld.Previous_Lead_owner__c      = ownerName;
-                ld.Is_Lead_ReAssigned__c       = true;
-                ld.Pushed_On__c                = System.now();
-                ld.Pushed_By__c                = UserInfo.getUserId();
-            }
-            else if (ld.RecordTypeId == RECOVERY_RT_ID && profileName == 'Pre Sales') {
-                ld.RecordTypeId                = PRESALES_RT_ID;
-                ld.Lead_Status__c              = 'Unable to connect';
-                ld.Previous_Lead_owner__c      = ownerName;
-                ld.Lead_ReAssigned_Date__c     = Date.today();
-                ld.Is_Lead_ReAssigned__c       = true;
-                ld.Is_Unqualified__c           = false;
-                ld.Unqualified_Date__c         = null;
-                ld.Unqualified_Lost_By__c      = null;
-                ld.Unqualified_Reason__c       = null;
-                ld.Recovery_Reassigned_Date__c = Date.today();
-                ld.Pushed_On__c                = System.now();
-                ld.Pushed_By__c                = UserInfo.getUserId();
-            }
-            else if (ld.RecordTypeId == RECOVERY_SVC_RT_ID && profileName == 'SVC Team') {
-                ld.RecordTypeId                = SVC_RT_ID;
-                ld.Lead_Status__c              = 'Allocate to SVC';
-                ld.Is_Unqualified__c           = false;
-                ld.Unqualified_Date__c         = null;
-                ld.Unqualified_Lost_By__c      = null;
-                ld.Unqualified_Reason__c       = null;
-                ld.Recovery_Reassigned_Date__c = Date.today();
-                ld.Pushed_On__c                = System.now();
-                ld.Pushed_By__c                = UserInfo.getUserId();
-            }
-
-            updates.add(ld);
-        }
-
-        if (!updates.isEmpty()) {
-            List<Database.SaveResult> saveResults = Database.update(updates, false);
-            for (Integer resultIndex = 0; resultIndex < saveResults.size(); resultIndex++) {
-                Database.SaveResult saveResult = saveResults[resultIndex];
-                if (!saveResult.isSuccess()) {
-                    String errorMessage = saveResult.getErrors().isEmpty() ? 'Unknown error' : saveResult.getErrors()[0].getMessage();
-                    failureMessages.add(updates[resultIndex].Lead_ID__c + ': ' + errorMessage);
-                }
-            }
-        }
-        return failureMessages;
-    }
-    /* ===== Added By Sathya - END : Fair split across all selected users + failed lead reporting ===== */
-
-    /* =========================================================
-       WRAPPER CLASS
-       ========================================================= */
-    public class LeadResult {
-        @AuraEnabled public List<Lead> leads      { get; set; }
-        @AuraEnabled public Integer    totalCount  { get; set; }
-
-        public LeadResult(List<Lead> leads, Integer totalCount) {
-            this.leads      = leads;
-            this.totalCount = totalCount;
-        }
-    }
-    
-}
